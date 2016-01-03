@@ -18,7 +18,8 @@ library
   exposed-modules:     Skywalker.App,
                        Skywalker.Pool,
                        Skywalker.WebSockets,
-                       Skywalker.StaticApp
+                       Skywalker.StaticApp,
+                       Skywalker.PostgreSQL
   build-depends:       base,
                        mtl,
                        transformers,
@@ -31,7 +32,8 @@ library
                        wai-websockets,
                        resource-pool,
                        warp,
-                       wai-app-static
+                       wai-app-static,
+                       postgresql-simple
   else
      build-depends:    ghcjs-base
 
