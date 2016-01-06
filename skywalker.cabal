@@ -19,7 +19,8 @@ library
                        Skywalker.Pool,
                        Skywalker.WebSockets,
                        Skywalker.StaticApp,
-                       Skywalker.PostgreSQL
+                       Skywalker.PostgreSQL,
+                       Skywalker.JSON
   build-depends:       base,
                        mtl,
                        transformers,
