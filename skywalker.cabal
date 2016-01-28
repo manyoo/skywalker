@@ -34,6 +34,7 @@ library
                        resource-pool,
                        warp,
                        wai-app-static,
+                       wai-extra,
                        postgresql-simple
   else
      build-depends:    ghcjs-base
