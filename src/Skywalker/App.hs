@@ -214,12 +214,12 @@ runClient url env c = do
         onClose = Nothing,
         onMessage = Just processServerMessage
         }
-      
+
       processServerMessage evt = do
         -- only string data is supported, if it fails, it's a bug in the framework
         let StringData d = getData evt
         onServerMessage $ parseJSONString d
-      
+
       onServerMessage response = do
         let res = fromJSON response
         case res of
@@ -233,7 +233,7 @@ runClient url env c = do
   return AppDone
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
-foreign import javascript unsafe "JSON.parse($1)" parseJSONString :: JSString -> JSON
+foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString -> JSON
 #else
 runClient _ _ _ = return AppDone
 #endif
