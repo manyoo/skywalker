@@ -19,6 +19,7 @@ import JavaScript.Web.MessageEvent
 
 import Control.Monad.Reader
 
+import Data.IORef
 import Data.JSString hiding (reverse)
 -- a dummy websocket connection used only on server side
 data Connection
@@ -150,9 +151,14 @@ liftServerIO m = liftIO m >>= return . return
 -- Client side definition
 #if defined(ghcjs_HOST_OS)
 type DispatchCenter = M.Map Nonce (MVar JSON)
-type ClientState = (Nonce, MVar DispatchCenter)
+data ClientState = ClientState {
+    csNonce      :: Nonce,
+    csDispCenter :: MVar DispatchCenter,
+    csWebSocket  :: IORef WebSocket
+    }
+
 -- define a client environment type with a websocket as well as a variable type
-type ClientEnv a = (WebSocket, a)
+type ClientEnv a = (URL, a)
 -- a (Client m e a) monad value means a monad with (ClientEnv e) environment,
 -- ClientState state, a monad m inside and return value a
 type Client e m = ReaderT (ClientEnv e) (StateT ClientState m)
@@ -187,17 +193,30 @@ onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> C
 #if defined(ghcjs_HOST_OS)
 onServer (Remote identifier args) = do
   (nonce, mv) <- newResult
-  ws <- fst <$> ask
-  -- send the actual request and wait for the result
-  liftIO $ send (encode $ toJSON (nonce, identifier, reverse args)) ws
-  (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
+  wsRef <- csWebSocket <$> get
+  ws <- liftIO $ readIORef wsRef
+  wsSt <- liftIO $ getReadyState ws
+
+  let sendMsg ws = do
+          -- send the actual request and wait for the result
+          liftIO $ send (encode $ toJSON (nonce, identifier, reverse args)) ws
+          (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
+  if wsSt == Connecting || wsSt == OPEN
+      then sendMsg ws
+      else do
+      url <- fst <$> ask
+      n <- csNonce <$> get
+      mvarDispCenter <- csDispCenter <$> get
+      newWs <- liftIO $ connect $ buildReq url mvarDispCenter
+      liftIO $ writeIORef wsRef newWs
+      sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-  (nonce, mvarDispCenter) <- get
+  (ClientState nonce mvarDispCenter ws) <- get
   mv <- liftIO newEmptyMVar
   liftIO $ modifyMVar_ mvarDispCenter (\m -> return $ M.insert nonce mv m)
-  put (nonce + 1, mvarDispCenter)
+  put $ ClientState (nonce + 1) mvarDispCenter ws
   return (nonce, mv)
 #else
 onServer _ = ClientDummy
@@ -207,31 +226,34 @@ runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS)
 runClient url env c = do
   mvarDispCenter <- liftIO $ newMVar M.empty
-  let defState = (0, mvarDispCenter)
-      req = WebSocketRequest {
-        url = urlString url,
-        protocols = ["GHCJS.App"],
-        onClose = Nothing,
-        onMessage = Just processServerMessage
-        }
-
-      processServerMessage evt = do
-        -- only string data is supported, if it fails, it's a bug in the framework
-        let StringData d = getData evt
-        onServerMessage $ parseJSONString d
-
-      onServerMessage response = do
-        let res = fromJSON response
-        case res of
-          Success (nonce :: Int, result :: JSON) -> modifyMVar_ mvarDispCenter (\m -> do
-                                                                                   putMVar (m M.! nonce) result
-                                                                                   return $ M.delete nonce m
-                                                                               )
-          Error e -> print e
+  let req = buildReq url mvarDispCenter
   ws <- liftIO $ connect req
-  liftIO $ runStateT (runReaderT c (ws, env)) defState
+  wsRef <- liftIO $ newIORef ws
+  let defState = ClientState 0 mvarDispCenter wsRef
+  liftIO $ runStateT (runReaderT c (url, env)) defState
   return AppDone
 
+buildReq url mvarDispCenter = WebSocketRequest {
+    url = urlString url,
+    protocols = ["GHCJS.App"],
+    onClose = Nothing,
+    onMessage = Just (processServerMessage mvarDispCenter)
+    }
+
+processServerMessage mvarDispCenter evt = do
+    -- only string data is supported, if it fails, it's a bug in the framework
+    let StringData d = getData evt
+    onServerMessage mvarDispCenter $ parseJSONString d
+
+onServerMessage mvarDispCenter response = do
+    let res = fromJSON response
+    case res of
+        Success (nonce :: Int, result :: JSON) -> modifyMVar_ mvarDispCenter (\m -> do
+                                                                                     putMVar (m M.! nonce) result
+                                                                                     return $ M.delete nonce m
+                                                                             )
+        Error e -> print e
+ 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
 foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString -> JSON
 #else
