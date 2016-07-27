@@ -4,6 +4,7 @@ module Skywalker.App where
 import Control.Monad.State
 import Control.Monad.IO.Class
 import Control.Concurrent.MVar
+import Control.Concurrent.STM
 
 import Data.ByteString hiding (reverse)
 import qualified Data.Map as M
@@ -152,9 +153,9 @@ liftServerIO m = liftIO m >>= return . return
 #if defined(ghcjs_HOST_OS)
 type DispatchCenter = M.Map Nonce (MVar JSON)
 data ClientState = ClientState {
-    csNonce      :: Nonce,
-    csDispCenter :: MVar DispatchCenter,
-    csWebSocket  :: IORef WebSocket
+    csNonce      :: TVar Nonce,
+    csDispCenter :: TVar DispatchCenter,
+    csWebSocket  :: TVar WebSocket
     }
 
 -- define a client environment type with a websocket as well as a variable type
@@ -193,8 +194,8 @@ onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> C
 #if defined(ghcjs_HOST_OS)
 onServer (Remote identifier args) = do
   (nonce, mv) <- newResult
-  wsRef <- csWebSocket <$> get
-  ws <- liftIO $ readIORef wsRef
+  wsTVar <- csWebSocket <$> get
+  ws <- liftIO $ readTVarIO wsTVar
   wsSt <- liftIO $ getReadyState ws
 
   let sendMsg ws = do
@@ -208,15 +209,17 @@ onServer (Remote identifier args) = do
       n <- csNonce <$> get
       mvarDispCenter <- csDispCenter <$> get
       newWs <- liftIO $ connect $ buildReq url mvarDispCenter
-      liftIO $ writeIORef wsRef newWs
+      liftIO $ atomically $ writeTVar wsTVar newWs
       sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-  (ClientState nonce mvarDispCenter ws) <- get
+  (ClientState mNonce mvarDispCenter ws) <- get
   mv <- liftIO newEmptyMVar
-  liftIO $ modifyMVar_ mvarDispCenter (\m -> return $ M.insert nonce mv m)
-  put $ ClientState (nonce + 1) mvarDispCenter ws
+  nonce <- liftIO $ readTVarIO mNonce
+  liftIO $ atomically $ do
+      modifyTVar' mvarDispCenter (\m -> M.insert nonce mv m)
+      writeTVar mNonce (nonce + 1)
   return (nonce, mv)
 #else
 onServer _ = ClientDummy
@@ -225,11 +228,12 @@ onServer _ = ClientDummy
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS)
 runClient url env c = do
-  mvarDispCenter <- liftIO $ newMVar M.empty
+  mvarDispCenter <- liftIO $ atomically $ newTVar M.empty
   let req = buildReq url mvarDispCenter
   ws <- liftIO $ connect req
-  wsRef <- liftIO $ newIORef ws
-  let defState = ClientState 0 mvarDispCenter wsRef
+  wsTVar <- liftIO $ atomically $ newTVar ws
+  mNonce <- liftIO $ atomically $ newTVar 0
+  let defState = ClientState mNonce mvarDispCenter wsTVar
   liftIO $ runStateT (runReaderT c (url, env)) defState
   return AppDone
 
@@ -248,10 +252,10 @@ processServerMessage mvarDispCenter evt = do
 onServerMessage mvarDispCenter response = do
     let res = fromJSON response
     case res of
-        Success (nonce :: Int, result :: JSON) -> modifyMVar_ mvarDispCenter (\m -> do
-                                                                                     putMVar (m M.! nonce) result
-                                                                                     return $ M.delete nonce m
-                                                                             )
+        Success (nonce :: Int, result :: JSON) -> do
+            m <- readTVarIO mvarDispCenter
+            putMVar (m M.! nonce) result
+            atomically $ writeTVar mvarDispCenter (M.delete nonce m)
         Error e -> print e
  
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type

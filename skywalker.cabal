@@ -25,7 +25,8 @@ library
                        mtl,
                        transformers,
                        containers,
-                       bytestring
+                       bytestring,
+                       stm
   default-language:    Haskell2010
   if !impl(ghcjs)
      build-depends:    aeson,
