@@ -7,6 +7,7 @@ module Skywalker.JSON (
   module I,
   module JavaScript.JSON.Types.Generic,
   module JavaScript.JSON.Types.Instances,
+  module JavaScript.JSON.Types.Internal,
   object, toObject
 #else
   module Data.Aeson,
@@ -20,6 +21,7 @@ import JavaScript.JSON.Types
 import JavaScript.JSON.Types.Class
 import JavaScript.JSON.Types.Generic
 import JavaScript.JSON.Types.Instances
+import JavaScript.JSON.Types.Internal hiding (object)
 import qualified JavaScript.JSON.Types.Internal as I
 
 import Data.JSString
