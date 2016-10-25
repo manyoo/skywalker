@@ -3,6 +3,7 @@ module Skywalker.App where
 
 import Control.Monad.State
 import Control.Monad.IO.Class
+import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 
@@ -74,7 +75,7 @@ newtype App a = App { unApp :: StateT AppState IO a }
 -- run the top-level App monad and return an IO action. This should be used at the begining
 -- of the whole application
 runApp :: App AppDone -> IO ()
-runApp = void . flip runStateT (0, M.empty) . unApp
+runApp = void . flip runStateT (1, M.empty) . unApp
 
 -- define a value that be used in remote functions
 class Remotable a where
@@ -232,7 +233,12 @@ runClient url env c = do
   let req = buildReq url mvarDispCenter
   ws <- liftIO $ connect req
   wsTVar <- liftIO $ atomically $ newTVar ws
-  mNonce <- liftIO $ atomically $ newTVar 0
+  mNonce <- liftIO $ atomically $ newTVar 1
+  let pingServer = do
+          send (encode $ toJSON (0 :: Int, 0 :: Int, [] :: [Int])) ws
+          threadDelay 3000000
+          pingServer
+  liftIO $ forkIO pingServer
   let defState = ClientState mNonce mvarDispCenter wsTVar
   liftIO $ runStateT (runReaderT c (url, env)) defState
   return AppDone
@@ -275,9 +281,12 @@ onEvent _ _ _ = ServerDummy
 -- server side dispatcher of client function calls
 onEvent conn mapping incoming = do
   let Success (nonce :: Int, identifier :: CallID, args :: [JSON]) = fromJSON incoming
-      Just f = M.lookup identifier mapping
-  result <- f args
-  liftIO $ sendTextData conn $ encode (nonce, result)
+  if nonce == 0 && identifier == 0
+      then return ()
+      else do
+      let Just f = M.lookup identifier mapping
+      result <- f args
+      liftIO $ sendTextData conn $ encode (nonce, result)
 #endif
 
 
