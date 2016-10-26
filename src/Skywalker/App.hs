@@ -63,10 +63,14 @@ type Nonce = Int
 -- a remote method is an IO action that accepts a list of JSON and return a JSON result
 type Method = [JSON] -> Server JSON
 
+-- specify whether the remote method is execuated in a sync or async way
+data MethodMode = MethodSync
+                | MethodAsync
+
 -- the state stored in the App monad, the first element, CallID, represents the next
 -- CallID available to be used for defining a new remote function. The second element
 -- is a map of all the defined remote functions
-type AppState = (CallID, M.Map CallID Method)
+type AppState = (CallID, M.Map CallID (MethodMode, Method))
 
 -- the top-level App monad for the whole app
 newtype App a = App { unApp :: StateT AppState IO a }
@@ -126,19 +130,24 @@ _ <.> _ = RemoteDummy
 
 -- convert a Remotable value to a Remote
 remote :: Remotable a => a -> App (Remote a)
+remoteWithMode :: Remotable a => MethodMode -> a -> App (Remote a)
 #if defined(ghcjs_HOST_OS)
 -- client side, only the CallID is interesting to us, so just remember the id in
 -- the Remote value. Don't forget to update the next available CallID
-remote _ = do
+remote = remoteWithMode MethodSync
+
+remoteWithMode _ _ = do
   (nextId, remotes) <- get
   put (nextId + 1, remotes)
   return (Remote nextId [])
 #else
 -- server side, not only update the CallId, but also convert the argument value
 -- into a Remote and store it in the AppState
-remote f = do
+remote = remoteWithMode MethodSync
+
+remoteWithMode m f = do
   (nextId, remotes) <- get
-  put (nextId + 1, M.insert nextId (mkRemote f) remotes)
+  put (nextId + 1, M.insert nextId (m, mkRemote f) remotes)
   return RemoteDummy
 #endif
 
@@ -281,19 +290,24 @@ runClient _ _ _ = return AppDone
 type DBParam = ByteString
 
 -- start the websocket server with db param, file path for static assets and port
-onEvent :: Connection -> M.Map CallID Method -> JSON -> Server ()
+onEvent :: TVar Connection -> M.Map CallID (MethodMode, Method) -> JSON -> Server ()
 #if defined(ghcjs_HOST_OS)
 onEvent _ _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
-onEvent conn mapping incoming = do
+onEvent connTVar mapping incoming = do
   let Success (nonce :: Int, identifier :: CallID, args :: [JSON]) = fromJSON incoming
   if nonce == 0 && identifier == 0
       then return ()
       else do
-      let Just f = M.lookup identifier mapping
-      result <- f args
-      liftIO $ sendTextData conn $ encode (nonce, result)
+      let Just (m, f) = M.lookup identifier mapping
+          processEvt = do
+              result <- f args
+              conn <- liftIO $ readTVarIO connTVar
+              liftIO $ sendTextData conn $ encode (nonce, result)
+      case m of
+          MethodSync -> processEvt
+          MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
 #endif
 
 
@@ -302,13 +316,15 @@ websocketServer = undefined
 #else
 websocketServer remoteMapping pendingConn = do
   conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App"))
-  websocketHandler remoteMapping conn
+  connTVar <- liftIO $ atomically $ newTVar conn
+  websocketHandler remoteMapping connTVar
   -- fork a new thread to send 'ping' control messages to the client every 3 seconds
   forkPingThread conn 3
 
-websocketHandler remoteMapping conn = do
+websocketHandler remoteMapping connTVar = do
+  conn <- readTVarIO connTVar
   msg <- receiveData conn
   let Just (m :: JSON) = decode msg
-  runServerM $ onEvent conn remoteMapping m
-  websocketHandler remoteMapping conn
+  runServerM $ onEvent connTVar remoteMapping m
+  websocketHandler remoteMapping connTVar
 #endif
