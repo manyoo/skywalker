@@ -211,6 +211,7 @@ onServer (Remote identifier args) = do
       mvarDispCenter <- csDispCenter <$> get
       newWs <- liftIO $ connect $ buildReq url mvarDispCenter
       liftIO $ atomically $ writeTVar wsTVar newWs
+      liftIO $ forkIO $ pingServer wsTVar
       sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
@@ -234,14 +235,20 @@ runClient url env c = do
   ws <- liftIO $ connect req
   wsTVar <- liftIO $ atomically $ newTVar ws
   mNonce <- liftIO $ atomically $ newTVar 1
-  let pingServer = do
-          send (encode $ toJSON (0 :: Int, 0 :: Int, [] :: [Int])) ws
-          threadDelay 3000000
-          pingServer
-  liftIO $ forkIO pingServer
+  liftIO $ forkIO (pingServer wsTVar)
   let defState = ClientState mNonce mvarDispCenter wsTVar
   liftIO $ runStateT (runReaderT c (url, env)) defState
   return AppDone
+
+pingServer wsTVar = do
+    ws <- readTVarIO wsTVar
+    wsSt <- getReadyState ws
+    if wsSt == Connecting || wsSt == OPEN
+        then do
+        send (encode $ toJSON (0 :: Int, 0 :: Int, [] :: [Int])) ws
+        threadDelay 3000000
+        pingServer wsTVar
+        else return ()
 
 buildReq url mvarDispCenter = WebSocketRequest {
     url = urlString url,
