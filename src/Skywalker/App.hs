@@ -130,12 +130,15 @@ _ <.> _ = RemoteDummy
 
 -- convert a Remotable value to a Remote
 remote :: Remotable a => a -> App (Remote a)
+remote = remoteWithMode MethodSync
+
+asyncRemote :: Remotable a => a -> App (Remote a)
+asyncRemote = remoteWithMode MethodAsync
+
 remoteWithMode :: Remotable a => MethodMode -> a -> App (Remote a)
 #if defined(ghcjs_HOST_OS)
 -- client side, only the CallID is interesting to us, so just remember the id in
 -- the Remote value. Don't forget to update the next available CallID
-remote = remoteWithMode MethodSync
-
 remoteWithMode _ _ = do
   (nextId, remotes) <- get
   put (nextId + 1, remotes)
@@ -143,8 +146,6 @@ remoteWithMode _ _ = do
 #else
 -- server side, not only update the CallId, but also convert the argument value
 -- into a Remote and store it in the AppState
-remote = remoteWithMode MethodSync
-
 remoteWithMode m f = do
   (nextId, remotes) <- get
   put (nextId + 1, M.insert nextId (m, mkRemote f) remotes)
