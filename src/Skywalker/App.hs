@@ -52,8 +52,8 @@ fromResult _ = undefined
 -- operation in App monad
 data AppDone = AppDone
 
--- CallID represents a single remote server function available to the client side.
-type CallID = Int
+-- MethodName is the name of a remote server function available to the client side.
+type MethodName = String
 
 -- Nonce is a tag used represent a specific remote function call, because each
 -- client can call the same remote function any times and we need to distinguish
@@ -67,10 +67,8 @@ type Method = [JSON] -> Server JSON
 data MethodMode = MethodSync
                 | MethodAsync
 
--- the state stored in the App monad, the first element, CallID, represents the next
--- CallID available to be used for defining a new remote function. The second element
--- is a map of all the defined remote functions
-type AppState = (CallID, M.Map CallID (MethodMode, Method))
+-- the state stored in the App monad, it is a map of all the defined remote functions
+type AppState = M.Map MethodName (MethodMode, Method)
 
 -- the top-level App monad for the whole app
 newtype App a = App { unApp :: StateT AppState IO a }
@@ -79,7 +77,7 @@ newtype App a = App { unApp :: StateT AppState IO a }
 -- run the top-level App monad and return an IO action. This should be used at the begining
 -- of the whole application
 runApp :: App AppDone -> IO ()
-runApp = void . flip runStateT (1, M.empty) . unApp
+runApp = void . flip runStateT M.empty . unApp
 
 -- define a value that be used in remote functions
 class Remotable a where
@@ -110,8 +108,8 @@ instance Monad Server where
 instance MonadIO Server where
   liftIO _ = ServerDummy
 
--- for a remote value, we just need to remember the CallID and arguments for it
-data Remote a = Remote CallID [JSON]
+-- for a remote value, we just need to remember the MethodName and arguments for it
+data Remote a = Remote MethodName [JSON]
 #else
 -- Server Monad is just a wrapper over m
 newtype Server a = Server { runServerM :: IO a }
@@ -123,32 +121,28 @@ data Remote a = RemoteDummy
 
 (<.>) :: ToJSON a => Remote (a -> b) -> a -> Remote b
 #if defined(ghcjs_HOST_OS)
-(Remote callId args) <.> arg = Remote callId (toJSON arg : args)
+(Remote name args) <.> arg = Remote name (toJSON arg : args)
 #else
 _ <.> _ = RemoteDummy
 #endif
 
 -- convert a Remotable value to a Remote
-remote :: Remotable a => a -> App (Remote a)
+remote :: Remotable a => MethodName -> a -> App (Remote a)
 remote = remoteWithMode MethodSync
 
-asyncRemote :: Remotable a => a -> App (Remote a)
+asyncRemote :: Remotable a => MethodName -> a -> App (Remote a)
 asyncRemote = remoteWithMode MethodAsync
 
-remoteWithMode :: Remotable a => MethodMode -> a -> App (Remote a)
+remoteWithMode :: Remotable a => MethodMode -> MethodName -> a -> App (Remote a)
 #if defined(ghcjs_HOST_OS)
--- client side, only the CallID is interesting to us, so just remember the id in
--- the Remote value. Don't forget to update the next available CallID
-remoteWithMode _ _ = do
-  (nextId, remotes) <- get
-  put (nextId + 1, remotes)
-  return (Remote nextId [])
+-- client side, just remember the name in the Remote value
+remoteWithMode _ n _ = return (Remote n [])
 #else
--- server side, not only update the CallId, but also convert the argument value
--- into a Remote and store it in the AppState
-remoteWithMode m f = do
-  (nextId, remotes) <- get
-  put (nextId + 1, M.insert nextId (m, mkRemote f) remotes)
+-- server side, convert the argument value into a Remote and store it in the AppState
+remoteWithMode m n f = do
+  remotes <- get
+  when (M.member n remotes) (error $ "Remote method '" ++ show n ++ "' already defined.")
+  put $ M.insert n (m, mkRemote f) remotes
   return RemoteDummy
 #endif
 
@@ -157,7 +151,7 @@ liftServerIO :: IO a -> App (Server a)
 #if defined(ghcjs_HOST_OS)
 liftServerIO _ = return ServerDummy
 #else
-liftServerIO m = liftIO m >>= return . return
+liftServerIO m = return <$> liftIO m
 #endif
 
 -- Client side definition
@@ -255,7 +249,7 @@ pingServer wsTVar = do
     wsSt <- getReadyState ws
     if wsSt == Connecting || wsSt == OPEN
         then do
-        send (encode $ toJSON (0 :: Int, 0 :: Int, [] :: [Int])) ws
+        send (encode $ toJSON (0 :: Int, "ping" :: String, [] :: [Int])) ws
         threadDelay 3000000
         pingServer wsTVar
         else return ()
@@ -280,7 +274,7 @@ onServerMessage mvarDispCenter response = do
             putMVar (m M.! nonce) result
             atomically $ writeTVar mvarDispCenter (M.delete nonce m)
         Error e -> print e
- 
+
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
 foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString -> JSON
 #else
@@ -291,16 +285,14 @@ runClient _ _ _ = return AppDone
 type DBParam = ByteString
 
 -- start the websocket server with db param, file path for static assets and port
-onEvent :: TVar Connection -> M.Map CallID (MethodMode, Method) -> JSON -> Server ()
+onEvent :: TVar Connection -> M.Map MethodName (MethodMode, Method) -> JSON -> Server ()
 #if defined(ghcjs_HOST_OS)
 onEvent _ _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
 onEvent connTVar mapping incoming = do
-  let Success (nonce :: Int, identifier :: CallID, args :: [JSON]) = fromJSON incoming
-  if nonce == 0 && identifier == 0
-      then return ()
-      else do
+  let Success (nonce :: Int, identifier :: MethodName, args :: [JSON]) = fromJSON incoming
+  unless (nonce == 0 && identifier == "ping") $ do
       let Just (m, f) = M.lookup identifier mapping
           processEvt = do
               result <- f args
