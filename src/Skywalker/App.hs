@@ -308,7 +308,7 @@ onEvent connTVar mapping incoming = do
 websocketServer = undefined
 #else
 websocketServer remoteMapping pendingConn = do
-  conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App"))
+  conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App") [])
   connTVar <- liftIO $ atomically $ newTVar conn
   websocketHandler remoteMapping connTVar
   -- fork a new thread to send 'ping' control messages to the client every 3 seconds
