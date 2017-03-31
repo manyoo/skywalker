@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances #-}
+{-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances, TypeFamilies #-}
 module Skywalker.App where
 
 import Control.Monad.State
@@ -70,6 +70,28 @@ type Method = [JSON] -> Server JSON
 data MethodMode = MethodSync
                 | MethodAsync
 
+-- ChannelName is the name of a Subscribable channel
+type ChannelName = String
+
+-- Subscribable defines the class for all data models that can be used in
+-- a channel
+class Subscribable m where
+    type SubModelID m :: *
+    subscribeModelId :: m -> SubModelID m
+
+-- the possible messages/actions on the data model of that channel
+data Subscribable m => SubMessage m = SMNewInstance m
+                                    | SMNewInstances [m]
+                                    | SMDelInstance (SubModelID m)
+                                    | SMDelInstances [SubModelID m]
+                                    | SMUpdateInstance m
+
+-- handle after subscribing to a channel.
+data Channel m = Channel {
+    channelName        :: String,
+    channelUnsubscribe :: IO ()
+    }
+
 -- the state stored in the App monad, it is a map of all the defined remote functions
 type AppState = M.Map MethodName (MethodMode, Method)
 
@@ -114,7 +136,7 @@ instance MonadIO Server where
 -- for a remote value, we just need to remember the MethodName and arguments for it
 data Remote a = Remote MethodName [JSON]
 #else
--- Server Monad is just a wrapper over m
+-- Server Monad is just a wrapper over IO
 newtype Server a = Server { runServerM :: IO a }
                  deriving (Functor, Applicative, Monad, MonadIO)
 
@@ -161,10 +183,12 @@ liftServerIO m = return <$> liftIO m
 #if defined(ghcjs_HOST_OS)
 type DispatchCenter = M.Map Nonce (MVar JSON)
 data ClientState = ClientState {
-    csClientId   :: UUID,
-    csNonce      :: TVar Nonce,
-    csDispCenter :: TVar DispatchCenter,
-    csWebSocket  :: TVar WebSocket
+    csClientId      :: UUID,
+    csNonce         :: TVar Nonce,
+    csDispCenter    :: TVar DispatchCenter,
+    csWebSocket     :: TVar WebSocket,
+    subscribeRemote :: Remote (JSON -> Server JSON),
+    publishRemote   :: Remote (JSON -> Server ())
     }
 
 -- define a client environment type with a websocket as well as a variable type
@@ -224,7 +248,7 @@ onServer (Remote identifier args) = do
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-    (ClientState uid mNonce mvarDispCenter ws) <- get
+    (ClientState uid mNonce mvarDispCenter ws _ _) <- get
     mv <- liftIO newEmptyMVar
     nonce <- liftIO $ readTVarIO mNonce
     liftIO $ atomically $ do
@@ -247,7 +271,11 @@ runClient url env c = do
 
     uid <- liftIO UUID.generateUUID
 
-    let defState = ClientState uid mNonce mvarDispCenter wsTVar
+    -- setup the two default remote methods used by the framework
+    subR <- asyncRemote "subscribe" subscribeForClient
+    pubR <- asyncRemote "publish" publishForClient
+
+    let defState = ClientState uid mNonce mvarDispCenter wsTVar subR pubR
     liftIO $ runStateT (runReaderT c (url, env)) defState
     return AppDone
 
@@ -288,9 +316,6 @@ foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString
 runClient _ _ _ = return AppDone
 #endif
 
-
-type DBParam = ByteString
-
 -- start the websocket server with db param, file path for static assets and port
 onEvent :: TVar Connection -> M.Map MethodName (MethodMode, Method) -> JSON -> Server ()
 #if defined(ghcjs_HOST_OS)
@@ -309,6 +334,22 @@ onEvent connTVar mapping incoming = do
             MethodSync -> processEvt
             MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
 #endif
+
+
+subscribeForClient = undefined
+publishForClient = undefined
+
+#if defined(ghcjs_HOST_OS)
+-- subscribe on the client side will just call a server side function to setup
+-- and return the channel handle
+subscribe :: Subscribable m => ChannelName -> (SubMessage m -> IO ()) -> IO (Channel m)
+subscribe name cb = undefined
+#else
+subscribe = undefined
+#endif
+
+publish :: Subscribable m => SubMessage m -> Channel m -> IO ()
+publish = undefined
 
 
 #if defined(ghcjs_HOST_OS)
