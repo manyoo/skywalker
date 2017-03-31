@@ -301,10 +301,10 @@ onEvent connTVar mapping incoming = do
     let Success (nonce :: Int, identifier :: MethodName, args :: [JSON]) = fromJSON incoming
     unless (nonce == 0 && identifier == "ping") $ do
         let Just (m, f) = M.lookup identifier mapping
-        processEvt = do
-            result <- f args
-            conn <- liftIO $ readTVarIO connTVar
-            liftIO $ sendTextData conn $ encode (nonce, result)
+            processEvt = do
+                result <- f args
+                conn <- liftIO $ readTVarIO connTVar
+                liftIO $ sendTextData conn $ encode (nonce, result)
         case m of
             MethodSync -> processEvt
             MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
