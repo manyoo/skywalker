@@ -1,10 +1,10 @@
 {-# LANGUAGE CPP #-}
 module Skywalker.Pool (
 #if defined(ghcjs_HOST_OS)
-  Pool,
-  createPool
+    Pool,
+    createPool
 #else
-  module Data.Pool
+    module Data.Pool
 #endif
   ) where
 

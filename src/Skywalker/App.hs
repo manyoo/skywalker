@@ -38,9 +38,9 @@ data WebSocketRequest
 
 newtype URL = URL {
 #if defined(ghcjs_HOST_OS)
-  urlString :: JSString
+    urlString :: JSString
 #else
-  urlString :: String
+    urlString :: String
 #endif
 }
 
@@ -84,32 +84,32 @@ runApp = void . flip runStateT M.empty . unApp
 
 -- define a value that be used in remote functions
 class Remotable a where
-  mkRemote :: a -> Method
+    mkRemote :: a -> Method
 
 instance (ToJSON a) => Remotable (Server a) where
-  mkRemote m _ = fmap toJSON m
+    mkRemote m _ = fmap toJSON m
 
 instance (FromJSON a, Remotable b) => Remotable (a -> b) where
-  mkRemote f (x:xs) = mkRemote (f jx) xs
-    where Success jx = fromJSON x
+    mkRemote f (x:xs) = mkRemote (f jx) xs
+        where Success jx = fromJSON x
 
 #if defined(ghcjs_HOST_OS)
 -- on the client side, we don't care about Server values, so it's just a dummy value
 data Server a = ServerDummy
 
 instance Functor Server where
-  fmap _ _ = ServerDummy
+    fmap _ _ = ServerDummy
 
 instance Applicative Server where
-  pure _ = ServerDummy
-  _ <*> _ = ServerDummy
+    pure _ = ServerDummy
+    _ <*> _ = ServerDummy
 
 instance Monad Server where
-  return _ = ServerDummy
-  _ >>= _ = ServerDummy
+    return _ = ServerDummy
+    _ >>= _ = ServerDummy
 
 instance MonadIO Server where
-  liftIO _ = ServerDummy
+    liftIO _ = ServerDummy
 
 -- for a remote value, we just need to remember the MethodName and arguments for it
 data Remote a = Remote MethodName [JSON]
@@ -143,10 +143,10 @@ remoteWithMode _ n _ = return (Remote n [])
 #else
 -- server side, convert the argument value into a Remote and store it in the AppState
 remoteWithMode m n f = do
-  remotes <- get
-  when (M.member n remotes) (error $ "Remote method '" ++ show n ++ "' already defined.")
-  put $ M.insert n (m, mkRemote f) remotes
-  return RemoteDummy
+    remotes <- get
+    when (M.member n remotes) (error $ "Remote method '" ++ show n ++ "' already defined.")
+    put $ M.insert n (m, mkRemote f) remotes
+    return RemoteDummy
 #endif
 
 -- lift a server side action into the App monad, only takes effect server side
@@ -174,21 +174,21 @@ type ClientEnv a = (URL, a)
 type Client e m = ReaderT (ClientEnv e) (StateT ClientState m)
 #else
 data Client e m a where
-  ClientDummy :: Monad m => Client e m a
+    ClientDummy :: Monad m => Client e m a
 
 instance Monad m => Functor (Client e m) where
-  fmap _ _ = ClientDummy
+    fmap _ _ = ClientDummy
 
 instance Monad m => Applicative (Client e m) where
-  pure _ = ClientDummy
-  _ <*> _ = ClientDummy
+    pure _ = ClientDummy
+    _ <*> _ = ClientDummy
 
 instance Monad m => Monad (Client e m) where
-  return _ = ClientDummy
-  _ >>= _ = ClientDummy
+    return _ = ClientDummy
+    _ >>= _ = ClientDummy
 
 instance Monad m => MonadIO (Client e m) where
-  liftIO _ = ClientDummy
+    liftIO _ = ClientDummy
 #endif
 
 -- get the custom environment data inside Client monad
@@ -202,35 +202,35 @@ getClientEnv = undefined
 onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
 #if defined(ghcjs_HOST_OS)
 onServer (Remote identifier args) = do
-  (nonce, mv) <- newResult
-  wsTVar <- csWebSocket <$> get
-  ws <- liftIO $ readTVarIO wsTVar
-  wsSt <- liftIO $ getReadyState ws
+    (nonce, mv) <- newResult
+    wsTVar <- csWebSocket <$> get
+    ws <- liftIO $ readTVarIO wsTVar
+    wsSt <- liftIO $ getReadyState ws
 
-  let sendMsg ws = do
-          -- send the actual request and wait for the result
-          liftIO $ send (encode $ toJSON (nonce, identifier, reverse args)) ws
-          (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
-  if wsSt == Connecting || wsSt == OPEN
-      then sendMsg ws
-      else do
-      url <- fst <$> ask
-      n <- csNonce <$> get
-      mvarDispCenter <- csDispCenter <$> get
-      newWs <- liftIO $ connect $ buildReq url mvarDispCenter
-      liftIO $ atomically $ writeTVar wsTVar newWs
-      liftIO $ forkIO $ pingServer wsTVar
-      sendMsg newWs
+    let sendMsg ws = do
+            -- send the actual request and wait for the result
+            liftIO $ send (encode $ toJSON (nonce, identifier, reverse args)) ws
+            (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
+    if wsSt == Connecting || wsSt == OPEN
+    then sendMsg ws
+    else do
+        url <- fst <$> ask
+        n <- csNonce <$> get
+        mvarDispCenter <- csDispCenter <$> get
+        newWs <- liftIO $ connect $ buildReq url mvarDispCenter
+        liftIO $ atomically $ writeTVar wsTVar newWs
+        liftIO $ forkIO $ pingServer wsTVar
+        sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-  (ClientState uid mNonce mvarDispCenter ws) <- get
-  mv <- liftIO newEmptyMVar
-  nonce <- liftIO $ readTVarIO mNonce
-  liftIO $ atomically $ do
-      modifyTVar' mvarDispCenter (\m -> M.insert nonce mv m)
-      writeTVar mNonce (nonce + 1)
-  return (nonce, mv)
+    (ClientState uid mNonce mvarDispCenter ws) <- get
+    mv <- liftIO newEmptyMVar
+    nonce <- liftIO $ readTVarIO mNonce
+    liftIO $ atomically $ do
+        modifyTVar' mvarDispCenter (\m -> M.insert nonce mv m)
+        writeTVar mNonce (nonce + 1)
+    return (nonce, mv)
 #else
 onServer _ = ClientDummy
 #endif
@@ -238,18 +238,18 @@ onServer _ = ClientDummy
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS)
 runClient url env c = do
-  mvarDispCenter <- liftIO $ atomically $ newTVar M.empty
-  let req = buildReq url mvarDispCenter
-  ws <- liftIO $ connect req
-  wsTVar <- liftIO $ atomically $ newTVar ws
-  mNonce <- liftIO $ atomically $ newTVar 1
-  liftIO $ forkIO (pingServer wsTVar)
+    mvarDispCenter <- liftIO $ atomically $ newTVar M.empty
+    let req = buildReq url mvarDispCenter
+    ws <- liftIO $ connect req
+    wsTVar <- liftIO $ atomically $ newTVar ws
+    mNonce <- liftIO $ atomically $ newTVar 1
+    liftIO $ forkIO (pingServer wsTVar)
 
-  uid <- liftIO UUID.generateUUID
+    uid <- liftIO UUID.generateUUID
 
-  let defState = ClientState uid mNonce mvarDispCenter wsTVar
-  liftIO $ runStateT (runReaderT c (url, env)) defState
-  return AppDone
+    let defState = ClientState uid mNonce mvarDispCenter wsTVar
+    liftIO $ runStateT (runReaderT c (url, env)) defState
+    return AppDone
 
 pingServer wsTVar = do
     ws <- readTVarIO wsTVar
@@ -298,16 +298,16 @@ onEvent _ _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
 onEvent connTVar mapping incoming = do
-  let Success (nonce :: Int, identifier :: MethodName, args :: [JSON]) = fromJSON incoming
-  unless (nonce == 0 && identifier == "ping") $ do
-      let Just (m, f) = M.lookup identifier mapping
-          processEvt = do
-              result <- f args
-              conn <- liftIO $ readTVarIO connTVar
-              liftIO $ sendTextData conn $ encode (nonce, result)
-      case m of
-          MethodSync -> processEvt
-          MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
+    let Success (nonce :: Int, identifier :: MethodName, args :: [JSON]) = fromJSON incoming
+    unless (nonce == 0 && identifier == "ping") $ do
+        let Just (m, f) = M.lookup identifier mapping
+        processEvt = do
+            result <- f args
+            conn <- liftIO $ readTVarIO connTVar
+            liftIO $ sendTextData conn $ encode (nonce, result)
+        case m of
+            MethodSync -> processEvt
+            MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
 #endif
 
 
@@ -315,16 +315,16 @@ onEvent connTVar mapping incoming = do
 websocketServer = undefined
 #else
 websocketServer remoteMapping pendingConn = do
-  conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App") [])
-  connTVar <- liftIO $ atomically $ newTVar conn
-  websocketHandler remoteMapping connTVar
-  -- fork a new thread to send 'ping' control messages to the client every 3 seconds
-  forkPingThread conn 3
+    conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App") [])
+    connTVar <- liftIO $ atomically $ newTVar conn
+    websocketHandler remoteMapping connTVar
+    -- fork a new thread to send 'ping' control messages to the client every 3 seconds
+    forkPingThread conn 3
 
 websocketHandler remoteMapping connTVar = do
-  conn <- readTVarIO connTVar
-  msg <- receiveData conn
-  let Just (m :: JSON) = decode msg
-  runServerM $ onEvent connTVar remoteMapping m
-  websocketHandler remoteMapping connTVar
+    conn <- readTVarIO connTVar
+    msg <- receiveData conn
+    let Just (m :: JSON) = decode msg
+    runServerM $ onEvent connTVar remoteMapping m
+    websocketHandler remoteMapping connTVar
 #endif
