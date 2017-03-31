@@ -20,7 +20,8 @@ library
                        Skywalker.WebSockets,
                        Skywalker.StaticApp,
                        Skywalker.PostgreSQL,
-                       Skywalker.JSON
+                       Skywalker.JSON,
+                       Skywalker.UUID
   build-depends:       base,
                        mtl,
                        transformers,
@@ -36,9 +37,12 @@ library
                        warp,
                        wai-app-static,
                        wai-extra,
-                       postgresql-simple
+                       postgresql-simple,
+                       uuid
   else
-     build-depends:    ghcjs-base
+     js-sources:       javascript/uuid.js
+     build-depends:    ghcjs-base,
+                       uuid-types
 
 test-suite skywalker-test
   type:                exitcode-stdio-1.0
