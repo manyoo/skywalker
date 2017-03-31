@@ -10,6 +10,9 @@ import Control.Concurrent.STM
 import Data.ByteString hiding (reverse)
 import qualified Data.Map as M
 
+import Skywalker.UUID (UUID)
+import qualified Skywalker.UUID as UUID
+
 -- import the different library for JSON
 #if defined(ghcjs_HOST_OS)
 import JavaScript.JSON.Types
@@ -158,6 +161,7 @@ liftServerIO m = return <$> liftIO m
 #if defined(ghcjs_HOST_OS)
 type DispatchCenter = M.Map Nonce (MVar JSON)
 data ClientState = ClientState {
+    csClientId   :: UUID,
     csNonce      :: TVar Nonce,
     csDispCenter :: TVar DispatchCenter,
     csWebSocket  :: TVar WebSocket
@@ -220,7 +224,7 @@ onServer (Remote identifier args) = do
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-  (ClientState mNonce mvarDispCenter ws) <- get
+  (ClientState uid mNonce mvarDispCenter ws) <- get
   mv <- liftIO newEmptyMVar
   nonce <- liftIO $ readTVarIO mNonce
   liftIO $ atomically $ do
@@ -240,7 +244,10 @@ runClient url env c = do
   wsTVar <- liftIO $ atomically $ newTVar ws
   mNonce <- liftIO $ atomically $ newTVar 1
   liftIO $ forkIO (pingServer wsTVar)
-  let defState = ClientState mNonce mvarDispCenter wsTVar
+
+  uid <- liftIO UUID.generateUUID
+
+  let defState = ClientState uid mNonce mvarDispCenter wsTVar
   liftIO $ runStateT (runReaderT c (url, env)) defState
   return AppDone
 
