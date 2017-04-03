@@ -3,6 +3,9 @@ module Skywalker.UUID
     (UUID, nil, toString, fromString, generateUUID
     ) where
 
+import Skywalker.JSON
+import Data.Maybe (fromJust)
+
 #if defined(ghcjs_HOST_OS)
 import Data.JSString
 import Data.Maybe (fromJust)
@@ -18,6 +21,12 @@ genUUID = unpack <$> js_generateUUID
 import Data.UUID
 import qualified Data.UUID.V4 as V4
 #endif
+
+instance ToJSON UUID where
+    toJSON = toJSON . toString
+
+instance FromJSON UUID where
+    parseJSON = fmap (fromJust . fromString) . parseJSON
 
 generateUUID :: IO UUID
 #if defined(ghcjs_HOST_OS)

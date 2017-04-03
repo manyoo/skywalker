@@ -55,6 +55,9 @@ fromResult _ = undefined
 -- operation in App monad
 data AppDone = AppDone
 
+-- a UUID to represent a client app
+type ClientID = UUID
+
 -- MethodName is the name of a remote server function available to the client side.
 type MethodName = String
 
@@ -66,12 +69,13 @@ type Nonce = Int
 -- a remote method is an IO action that accepts a list of JSON and return a JSON result
 type Method = [JSON] -> Server JSON
 
--- specify whether the remote method is execuated in a sync or async way
+-- specify whether the remote method is execuated in a sync, async or subscription based way
 data MethodMode = MethodSync
                 | MethodAsync
+                | MethodSubscribe
 
 -- ChannelName is the name of a Subscribable channel
-type ChannelName = String
+type ChannelID   = UUID
 
 -- Subscribable defines the class for all data models that can be used in
 -- a channel
@@ -85,12 +89,6 @@ data Subscribable m => SubMessage m = SMNewInstance m
                                     | SMDelInstance (SubModelID m)
                                     | SMDelInstances [SubModelID m]
                                     | SMUpdateInstance m
-
--- handle after subscribing to a channel.
-data Channel m = Channel {
-    channelName        :: String,
-    channelUnsubscribe :: IO ()
-    }
 
 -- the state stored in the App monad, it is a map of all the defined remote functions
 type AppState = M.Map MethodName (MethodMode, Method)
@@ -183,16 +181,17 @@ liftServerIO m = return <$> liftIO m
 #if defined(ghcjs_HOST_OS)
 type DispatchCenter = M.Map Nonce (MVar JSON)
 data ClientState = ClientState {
-    csClientId      :: UUID,
-    csNonce         :: TVar Nonce,
-    csDispCenter    :: TVar DispatchCenter,
-    csWebSocket     :: TVar WebSocket,
-    subscribeRemote :: Remote (JSON -> Server JSON),
-    publishRemote   :: Remote (JSON -> Server ())
+    csNonce      :: TVar Nonce,
+    csDispCenter :: TVar DispatchCenter,
+    csWebSocket  :: TVar WebSocket
     }
 
 -- define a client environment type with a websocket as well as a variable type
-type ClientEnv a = (URL, a)
+data ClientEnv a = ClientEnv {
+    ceUrl      :: URL,
+    ceClientId :: ClientID,
+    ceCustom   :: a
+    }
 -- a (Client m e a) monad value means a monad with (ClientEnv e) environment,
 -- ClientState state, a monad m inside and return value a
 type Client e m = ReaderT (ClientEnv e) (StateT ClientState m)
@@ -218,7 +217,7 @@ instance Monad m => MonadIO (Client e m) where
 -- get the custom environment data inside Client monad
 getClientEnv :: Monad m => Client e m e
 #if defined(ghcjs_HOST_OS)
-getClientEnv = snd <$> ask
+getClientEnv = ceCustom <$> ask
 #else
 getClientEnv = undefined
 #endif
@@ -238,7 +237,7 @@ onServer (Remote identifier args) = do
     if wsSt == Connecting || wsSt == OPEN
     then sendMsg ws
     else do
-        url <- fst <$> ask
+        url <- ceUrl <$> ask
         n <- csNonce <$> get
         mvarDispCenter <- csDispCenter <$> get
         newWs <- liftIO $ connect $ buildReq url mvarDispCenter
@@ -248,7 +247,7 @@ onServer (Remote identifier args) = do
 
 newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
 newResult = do
-    (ClientState uid mNonce mvarDispCenter ws _ _) <- get
+    (ClientState mNonce mvarDispCenter ws) <- get
     mv <- liftIO newEmptyMVar
     nonce <- liftIO $ readTVarIO mNonce
     liftIO $ atomically $ do
@@ -271,12 +270,8 @@ runClient url env c = do
 
     uid <- liftIO UUID.generateUUID
 
-    -- setup the two default remote methods used by the framework
-    subR <- asyncRemote "subscribe" subscribeForClient
-    pubR <- asyncRemote "publish" publishForClient
-
-    let defState = ClientState uid mNonce mvarDispCenter wsTVar subR pubR
-    liftIO $ runStateT (runReaderT c (url, env)) defState
+    let defState = ClientState mNonce mvarDispCenter wsTVar
+    liftIO $ runStateT (runReaderT c (ClientEnv url uid env)) defState
     return AppDone
 
 pingServer wsTVar = do
@@ -334,23 +329,6 @@ onEvent connTVar mapping incoming = do
             MethodSync -> processEvt
             MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
 #endif
-
-
-subscribeForClient = undefined
-publishForClient = undefined
-
-#if defined(ghcjs_HOST_OS)
--- subscribe on the client side will just call a server side function to setup
--- and return the channel handle
-subscribe :: Subscribable m => ChannelName -> (SubMessage m -> IO ()) -> IO (Channel m)
-subscribe name cb = undefined
-#else
-subscribe = undefined
-#endif
-
-publish :: Subscribable m => SubMessage m -> Channel m -> IO ()
-publish = undefined
-
 
 #if defined(ghcjs_HOST_OS)
 websocketServer = undefined
