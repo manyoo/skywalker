@@ -73,6 +73,7 @@ type Method = [JSON] -> Server JSON
 data MethodMode = MethodSync
                 | MethodAsync
                 | MethodSubscribe
+                deriving Eq
 
 -- ChannelName is the name of a Subscribable channel
 type ChannelID   = UUID
@@ -132,7 +133,7 @@ instance MonadIO Server where
     liftIO _ = ServerDummy
 
 -- for a remote value, we just need to remember the MethodName and arguments for it
-data Remote a = Remote MethodName [JSON]
+data Remote a = Remote MethodName MethodMode [JSON]
 #else
 -- Server Monad is just a wrapper over IO
 newtype Server a = Server { runServerM :: IO a }
@@ -144,7 +145,7 @@ data Remote a = RemoteDummy
 
 (<.>) :: ToJSON a => Remote (a -> b) -> a -> Remote b
 #if defined(ghcjs_HOST_OS)
-(Remote name args) <.> arg = Remote name (toJSON arg : args)
+(Remote name mode args) <.> arg = Remote name mode (toJSON arg : args)
 #else
 _ <.> _ = RemoteDummy
 #endif
@@ -156,10 +157,13 @@ remote = remoteWithMode MethodSync
 asyncRemote :: Remotable a => MethodName -> a -> App (Remote a)
 asyncRemote = remoteWithMode MethodAsync
 
+remoteChannel :: Remotable a => MethodName -> a -> App (Remote a)
+remoteChannel = remoteWithMode MethodSubscribe
+
 remoteWithMode :: Remotable a => MethodMode -> MethodName -> a -> App (Remote a)
 #if defined(ghcjs_HOST_OS)
 -- client side, just remember the name in the Remote value
-remoteWithMode _ n _ = return (Remote n [])
+remoteWithMode m n _ = return (Remote n m [])
 #else
 -- server side, convert the argument value into a Remote and store it in the AppState
 remoteWithMode m n f = do
@@ -179,7 +183,7 @@ liftServerIO m = return <$> liftIO m
 
 -- Client side definition
 #if defined(ghcjs_HOST_OS)
-type DispatchCenter = M.Map Nonce (MVar JSON)
+type DispatchCenter = M.Map Nonce (MethodMode, MVar JSON)
 data ClientState = ClientState {
     csNonce      :: TVar Nonce,
     csDispCenter :: TVar DispatchCenter,
@@ -224,8 +228,8 @@ getClientEnv = undefined
 
 onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
 #if defined(ghcjs_HOST_OS)
-onServer (Remote identifier args) = do
-    (nonce, mv) <- newResult
+onServer (Remote identifier mode args) = do
+    (nonce, mv) <- newResult mode
     wsTVar <- csWebSocket <$> get
     ws <- liftIO $ readTVarIO wsTVar
     wsSt <- liftIO $ getReadyState ws
@@ -245,13 +249,13 @@ onServer (Remote identifier args) = do
         liftIO $ forkIO $ pingServer wsTVar
         sendMsg newWs
 
-newResult :: (Monad m, MonadIO m) => Client e m (Nonce, MVar JSON)
-newResult = do
+newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
+newResult mode = do
     (ClientState mNonce mvarDispCenter ws) <- get
     mv <- liftIO newEmptyMVar
     nonce <- liftIO $ readTVarIO mNonce
     liftIO $ atomically $ do
-        modifyTVar' mvarDispCenter (\m -> M.insert nonce mv m)
+        modifyTVar' mvarDispCenter (\m -> M.insert nonce (mode, mv) m)
         writeTVar mNonce (nonce + 1)
     return (nonce, mv)
 #else
@@ -301,8 +305,9 @@ onServerMessage mvarDispCenter response = do
     case res of
         Success (nonce :: Int, result :: JSON) -> do
             m <- readTVarIO mvarDispCenter
-            putMVar (m M.! nonce) result
-            atomically $ writeTVar mvarDispCenter (M.delete nonce m)
+            let (mode, mv) = m M.! nonce
+            putMVar mv result
+            when (mode /= MethodSubscribe) $ atomically $ writeTVar mvarDispCenter (M.delete nonce m)
         Error e -> print e
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
