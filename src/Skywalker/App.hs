@@ -230,13 +230,14 @@ onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> C
 #if defined(ghcjs_HOST_OS)
 onServer (Remote identifier mode args) = do
     (nonce, mv) <- newResult mode
-    wsTVar <- csWebSocket <$> get
-    ws <- liftIO $ readTVarIO wsTVar
-    wsSt <- liftIO $ getReadyState ws
+    cid         <- ceClientId <$> ask
+    wsTVar      <- csWebSocket <$> get
+    ws          <- liftIO $ readTVarIO wsTVar
+    wsSt        <- liftIO $ getReadyState ws
 
     let sendMsg ws = do
             -- send the actual request and wait for the result
-            liftIO $ send (encode $ toJSON (nonce, identifier, reverse args)) ws
+            liftIO $ send (encode $ toJSON (nonce, identifier, cid, reverse args)) ws
             (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
     if wsSt == Connecting || wsSt == OPEN
     then sendMsg ws
@@ -246,7 +247,7 @@ onServer (Remote identifier mode args) = do
         mvarDispCenter <- csDispCenter <$> get
         newWs <- liftIO $ connect $ buildReq url mvarDispCenter
         liftIO $ atomically $ writeTVar wsTVar newWs
-        liftIO $ forkIO $ pingServer wsTVar
+        liftIO $ forkIO $ pingServer wsTVar cid
         sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
@@ -270,22 +271,22 @@ runClient url env c = do
     ws <- liftIO $ connect req
     wsTVar <- liftIO $ atomically $ newTVar ws
     mNonce <- liftIO $ atomically $ newTVar 1
-    liftIO $ forkIO (pingServer wsTVar)
-
     uid <- liftIO UUID.generateUUID
+
+    liftIO $ forkIO (pingServer wsTVar uid)
 
     let defState = ClientState mNonce mvarDispCenter wsTVar
     liftIO $ runStateT (runReaderT c (ClientEnv url uid env)) defState
     return AppDone
 
-pingServer wsTVar = do
+pingServer wsTVar cid = do
     ws <- readTVarIO wsTVar
     wsSt <- getReadyState ws
     if wsSt == Connecting || wsSt == OPEN
         then do
-        send (encode $ toJSON (0 :: Int, "ping" :: String, [] :: [Int])) ws
+        send (encode $ toJSON (0 :: Int, "ping" :: String, cid, [] :: [Int])) ws
         threadDelay 3000000
-        pingServer wsTVar
+        pingServer wsTVar cid
         else return ()
 
 buildReq url mvarDispCenter = WebSocketRequest {
@@ -323,7 +324,7 @@ onEvent _ _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
 onEvent connTVar mapping incoming = do
-    let Success (nonce :: Int, identifier :: MethodName, args :: [JSON]) = fromJSON incoming
+    let Success (nonce :: Int, identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
     unless (nonce == 0 && identifier == "ping") $ do
         let Just (m, f) = M.lookup identifier mapping
             processEvt = do
@@ -333,6 +334,7 @@ onEvent connTVar mapping incoming = do
         case m of
             MethodSync -> processEvt
             MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
+            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM processEvt
 #endif
 
 #if defined(ghcjs_HOST_OS)
