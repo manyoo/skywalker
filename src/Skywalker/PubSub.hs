@@ -39,11 +39,22 @@ data Subscribable m => SubMessage m = SMNewInstance m
                                               -- because it's not actually used
 
 instance (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => ToJSON (SubMessage m) where
-    toJSON (SMNewInstance m)    = object ["NewInstance" .= m]
-    toJSON (SMNewInstances ms)  = object ["NewIntances" .= ms]
-    toJSON (SMDelInstances i)   = object ["DelInstances" .= i]
-    toJSON (SMUpdateInstance m) = object ["UpdateInstance" .= m]
-    toJSON SMDummy              = object []
+    toJSON (SMNewInstance m)    = object ["cmd" .= ("NewInstance" :: String), "value" .= m]
+    toJSON (SMNewInstances ms)  = object ["cmd" .= ("NewInstances" :: String), "value" .= ms]
+    toJSON (SMDelInstances i)   = object ["cmd" .= ("DelInstances" :: String), "value" .= i]
+    toJSON (SMUpdateInstance m) = object ["cmd" .= ("UpdateInstance" :: String), "value" .= m]
+    toJSON SMDummy              = object ["cmd" .= ("Dummy" :: String), "value" .= ("" :: String)]
+
+instance (Subscribable m, FromJSON m, FromJSON (SubModelID m)) => FromJSON (SubMessage m) where
+    parseJSON v = do
+        let o = toObject v
+        c <- o .: "cmd"
+        let parseValue "NewInstance"    = SMNewInstance    <$> o .: "value"
+            parseValue "NewInstances"   = SMNewInstances   <$> o .: "value"
+            parseValue "DelInstances"   = SMDelInstances   <$> o .: "value"
+            parseValue "UpdateInstance" = SMUpdateInstance <$> o .: "value"
+            parseValue "Dummy"          = return SMDummy
+        parseValue $ jsonString c
 
 safeHead []    = Nothing
 safeHead (x:_) = Just x

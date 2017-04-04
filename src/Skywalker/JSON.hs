@@ -8,10 +8,10 @@ module Skywalker.JSON (
     module JavaScript.JSON.Types.Generic,
     module JavaScript.JSON.Types.Instances,
     module JavaScript.JSON.Types.Internal,
-    object, toObject
+    object, toObject, jsonString,
 #else
     module Data.Aeson,
-    toObject
+    toObject, jsonString
 #endif
   ) where
 
@@ -34,9 +34,18 @@ toObject v = let v' = I.match v
              in case v' of
                  I.Object o -> o
 
+jsonString :: I.Value -> String
+jsonString v = let v' = I.match v
+             in case v' of
+                 I.String s -> unpack s
+
 #else
 import Data.Aeson
+import Data.Text (unpack)
 
 toObject :: Value -> Object
 toObject (Object v) = v
+
+jsonString :: Value -> String
+jsonString (String s) = unpack s
 #endif
