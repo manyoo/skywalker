@@ -2,10 +2,12 @@
 module Skywalker.App where
 
 import Control.Monad.State
+import Control.Monad.Reader
 import Control.Monad.IO.Class
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import Data.Maybe (isJust, fromJust)
 
 import Data.ByteString hiding (reverse)
 import qualified Data.Map as M
@@ -21,8 +23,6 @@ import JavaScript.JSON.Types.Internal
 import JavaScript.JSON.Types.Instances
 import JavaScript.Web.WebSocket
 import JavaScript.Web.MessageEvent
-
-import Control.Monad.Reader
 
 import Data.IORef
 import Data.JSString hiding (reverse)
@@ -75,22 +75,6 @@ data MethodMode = MethodSync
                 | MethodSubscribe
                 deriving Eq
 
--- ChannelName is the name of a Subscribable channel
-type ChannelID   = UUID
-
--- Subscribable defines the class for all data models that can be used in
--- a channel
-class Subscribable m where
-    type SubModelID m :: *
-    subscribeModelId :: m -> SubModelID m
-
--- the possible messages/actions on the data model of that channel
-data Subscribable m => SubMessage m = SMNewInstance m
-                                    | SMNewInstances [m]
-                                    | SMDelInstance (SubModelID m)
-                                    | SMDelInstances [SubModelID m]
-                                    | SMUpdateInstance m
-
 -- the state stored in the App monad, it is a map of all the defined remote functions
 type AppState = M.Map MethodName (MethodMode, Method)
 
@@ -136,8 +120,17 @@ instance MonadIO Server where
 data Remote a = Remote MethodName MethodMode [JSON]
 #else
 -- Server Monad is just a wrapper over IO
-newtype Server a = Server { runServerM :: IO a }
-                 deriving (Functor, Applicative, Monad, MonadIO)
+newtype ServerState = ServerState {
+    ssConnection :: Maybe (TVar Connection)
+    }
+
+newtype ServerEnv = ServerEnv {
+    seClientId :: Maybe ClientID
+    }
+
+type Server a = ReaderT ServerEnv (StateT ServerState IO) a
+
+runServerM e st = flip evalStateT st . flip runReaderT e
 
 -- remote values are not interested on the server side either
 data Remote a = RemoteDummy
@@ -318,23 +311,23 @@ runClient _ _ _ = return AppDone
 #endif
 
 -- start the websocket server with db param, file path for static assets and port
-onEvent :: TVar Connection -> M.Map MethodName (MethodMode, Method) -> JSON -> Server ()
+onEvent :: M.Map MethodName (MethodMode, Method) -> JSON -> Server ()
 #if defined(ghcjs_HOST_OS)
-onEvent _ _ _ = ServerDummy
+onEvent _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
-onEvent connTVar mapping incoming = do
+onEvent mapping incoming = do
     let Success (nonce :: Int, identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
     unless (nonce == 0 && identifier == "ping") $ do
         let Just (m, f) = M.lookup identifier mapping
-            processEvt = do
-                result <- f args
-                conn <- liftIO $ readTVarIO connTVar
-                liftIO $ sendTextData conn $ encode (nonce, result)
+            processEvt = f args >>= sendToClient nonce
+            processSub = f args
+            newEnv = ServerEnv (Just cid)
+        st <- get
         case m of
             MethodSync -> processEvt
-            MethodAsync -> liftIO $ void $ forkIO $ runServerM processEvt
-            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM processEvt
+            MethodAsync -> liftIO $ void $ forkIO $ runServerM newEnv st processEvt
+            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM newEnv st processEvt
 #endif
 
 #if defined(ghcjs_HOST_OS)
@@ -351,6 +344,15 @@ websocketHandler remoteMapping connTVar = do
     conn <- readTVarIO connTVar
     msg <- receiveData conn
     let Just (m :: JSON) = decode msg
-    runServerM $ onEvent connTVar remoteMapping m
+    runServerM (ServerEnv Nothing) (ServerState (Just connTVar)) $ onEvent remoteMapping m
     websocketHandler remoteMapping connTVar
+
+sendToClient :: ToJSON a => Int -> a -> Server ()
+sendToClient nonce res = do
+    connTVarM <- ssConnection <$> get
+    when (isJust connTVarM) $ do
+        let connTVar = fromJust connTVarM
+        conn <- liftIO $ readTVarIO connTVar
+        liftIO $ sendTextData conn $ encode (nonce, res)
+
 #endif
