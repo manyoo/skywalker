@@ -8,6 +8,7 @@ import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Data.Maybe (isJust, fromJust)
+import Data.Default
 
 import Data.ByteString hiding (reverse)
 import qualified Data.Map as M
@@ -124,9 +125,15 @@ newtype ServerState = ServerState {
     ssConnection :: Maybe (TVar Connection)
     }
 
+instance Default ServerState where
+    def = ServerState Nothing
+
 newtype ServerEnv = ServerEnv {
     seClientId :: Maybe ClientID
     }
+
+instance Default ServerEnv where
+    def = ServerEnv Nothing
 
 type Server a = ReaderT ServerEnv (StateT ServerState IO) a
 
