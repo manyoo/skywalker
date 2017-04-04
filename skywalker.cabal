@@ -21,7 +21,8 @@ library
                        Skywalker.StaticApp,
                        Skywalker.PostgreSQL,
                        Skywalker.JSON,
-                       Skywalker.UUID
+                       Skywalker.UUID,
+                       Skywalker.PubSub
   build-depends:       base,
                        mtl,
                        transformers,

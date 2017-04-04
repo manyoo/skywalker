@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances, TypeFamilies #-}
+{-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances #-}
 module Skywalker.App where
 
 import Control.Monad.State
@@ -128,12 +128,13 @@ newtype ServerState = ServerState {
 instance Default ServerState where
     def = ServerState Nothing
 
-newtype ServerEnv = ServerEnv {
-    seClientId :: Maybe ClientID
+data ServerEnv = ServerEnv {
+    seClientId     :: Maybe ClientID,
+    seCurrentNonce :: Maybe Int
     }
 
 instance Default ServerEnv where
-    def = ServerEnv Nothing
+    def = ServerEnv Nothing Nothing
 
 type Server a = ReaderT ServerEnv (StateT ServerState IO) a
 
@@ -328,13 +329,13 @@ onEvent mapping incoming = do
     unless (nonce == 0 && identifier == "ping") $ do
         let Just (m, f) = M.lookup identifier mapping
             processEvt = f args >>= sendToClient nonce
-            processSub = f args
-            newEnv = ServerEnv (Just cid)
+            processSub = void $ f args
+            newEnv = ServerEnv (Just cid) (Just nonce)
         st <- get
         case m of
             MethodSync -> processEvt
             MethodAsync -> liftIO $ void $ forkIO $ runServerM newEnv st processEvt
-            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM newEnv st processEvt
+            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM newEnv st processSub
 #endif
 
 #if defined(ghcjs_HOST_OS)
@@ -351,7 +352,7 @@ websocketHandler remoteMapping connTVar = do
     conn <- readTVarIO connTVar
     msg <- receiveData conn
     let Just (m :: JSON) = decode msg
-    runServerM (ServerEnv Nothing) (ServerState (Just connTVar)) $ onEvent remoteMapping m
+    runServerM def (ServerState (Just connTVar)) $ onEvent remoteMapping m
     websocketHandler remoteMapping connTVar
 
 sendToClient :: ToJSON a => Int -> a -> Server ()
@@ -360,6 +361,9 @@ sendToClient nonce res = do
     when (isJust connTVarM) $ do
         let connTVar = fromJust connTVarM
         conn <- liftIO $ readTVarIO connTVar
-        liftIO $ sendTextData conn $ encode (nonce, res)
+        sendMessageToClient nonce res conn
+
+sendMessageToClient :: ToJSON a => Int -> a -> Connection -> Server ()
+sendMessageToClient nonce res conn = liftIO $ sendTextData conn $ encode (nonce, res)
 
 #endif
