@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, TypeFamilies, TypeFamilyDependencies, FlexibleContexts, UndecidableInstances, OverloadedStrings #-}
+{-# LANGUAGE CPP, TypeFamilies, FlexibleContexts, UndecidableInstances, OverloadedStrings #-}
 module Skywalker.PubSub
     (Subscribable(..), SubMessage(..),
 #if !defined(ghcjs_HOST_OS)
@@ -28,7 +28,7 @@ import Network.WebSockets
 -- Subscribable defines the class for all data models that can be used in
 -- a channel
 class Subscribable m where
-    type SubModelID m = i | i -> m
+    type SubModelID m :: *
     subscribeModelId :: m -> SubModelID m
 
 -- the possible messages/actions on the data model of that channel
