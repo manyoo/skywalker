@@ -8,6 +8,7 @@ module Skywalker.PubSub
 
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Default
 
 import Control.Concurrent.STM
 
@@ -70,7 +71,7 @@ getSubModelId (SMUpdateInstance m) = Just $ subscribeModelId m
 data ChannelBuilder m = ChannelBuilder {
     cbSubscribe   :: SubModelID m -> Server (SubMessage m),
     cbPublish     :: SubMessage m -> Server (),
-    cbUnsubscribe :: Server ()
+    cbUnsubscribe :: SubModelID m -> Server ()
     }
 
 -- data structures used for managing the subscription channles and clients
@@ -83,11 +84,37 @@ data ClientSubscription m = ClientSubscription {
     }
 
 -- this will store all clients for one channel
-type ChannelSubscribers m = Map ClientID (ClientSubscription m)
+newtype ChannelSubscribers m = ChannelSubscribers {
+    csClientSubscribers :: Map (ClientID, SubModelID m) (ClientSubscription m)
+    }
 
-buildChannel :: (Subscribable m, ToJSON m, ToJSON (SubModelID m), Eq (SubModelID m)) => IO (ChannelBuilder m)
+instance Default (ChannelSubscribers m) where
+    def = ChannelSubscribers Map.empty
+
+addClientSubscriber :: (Subscribable m, Ord (SubModelID m)) => ChannelSubscribers m -> ClientSubscription m -> ChannelSubscribers m
+addClientSubscriber ch cs = ch { csClientSubscribers = newMap }
+    where m = csClientSubscribers ch
+          k = (csClientId cs, csSubModelId cs)
+
+          newMap = case Map.lookup k m of
+                        Just _ -> m
+                        Nothing -> Map.insert k cs m
+
+delClientSubscriber :: (Subscribable m, Ord (SubModelID m)) => ChannelSubscribers m -> ClientID -> SubModelID m -> ChannelSubscribers m
+delClientSubscriber ch cid sid = ch { csClientSubscribers = newMap }
+    where m = csClientSubscribers ch
+          k = (cid, sid)
+          newMap = Map.delete k m
+
+findSubscribers :: Eq (SubModelID m) => ChannelSubscribers m -> ClientID -> SubModelID m -> [ClientSubscription m]
+findSubscribers ch cid sid = Map.elems $ Map.filter (validSubscriber cid sid) $ csClientSubscribers ch
+
+validSubscriber :: Eq (SubModelID m) => ClientID -> SubModelID m -> ClientSubscription m -> Bool
+validSubscriber cid sid cs = csClientId cs /= cid && csSubModelId cs == sid
+
+buildChannel :: (Subscribable m, ToJSON m, ToJSON (SubModelID m), Eq (SubModelID m), Ord (SubModelID m)) => IO (ChannelBuilder m)
 buildChannel = do
-    channelTVar <- atomically $ newTVar Map.empty
+    channelTVar <- atomically $ newTVar def
     let sub sid = do
             clientIdM <- seClientId <$> ask
             nonceM    <- seCurrentNonce <$> ask
@@ -96,12 +123,10 @@ buildChannel = do
                 let cid    = fromJust clientIdM
                     nonce  = fromJust nonceM
                     conVar = fromJust connVarM
-                m <- readTVar channelTVar
-                let newM = case Map.lookup cid m of
-                                Just _ -> m
-                                Nothing -> Map.insert cid cs m
-                    cs = ClientSubscription cid sid nonce conVar
-                writeTVar channelTVar newM
+                ch <- readTVar channelTVar
+                let cs = ClientSubscription cid sid nonce conVar
+                    newCh = addClientSubscriber ch cs
+                writeTVar channelTVar newCh
 
             return SMDummy
 
@@ -114,19 +139,13 @@ buildChannel = do
                 let css = findSubscribers m (fromJust clientIdM) (fromJust sidM)
                 mapM_ (publishToClients msg) css
 
-        unsub = do
+        unsub sid = do
             clientIdM <- seClientId <$> ask
             liftIO $ when (isJust clientIdM) $ atomically $ do
-                m <- readTVar channelTVar
-                let newM = Map.delete (fromJust clientIdM) m
-                writeTVar channelTVar newM
+                ch <- readTVar channelTVar
+                let newCh = delClientSubscriber ch (fromJust clientIdM) sid
+                writeTVar channelTVar newCh
     return $ ChannelBuilder sub pub unsub
-
-findSubscribers :: Eq (SubModelID m) => ChannelSubscribers m -> ClientID -> SubModelID m -> [ClientSubscription m]
-findSubscribers m cid sid = Map.elems $ Map.filter (validSubscriber cid sid) m
-
-validSubscriber :: Eq (SubModelID m) => ClientID -> SubModelID m -> ClientSubscription m -> Bool
-validSubscriber cid sid cs = csClientId cs /= cid && csSubModelId cs == sid
 
 publishToClients :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server ()
 publishToClients msg cs = liftIO (readTVarIO connVar) >>= sendMessageToClient nonce msg
