@@ -34,6 +34,7 @@ class Subscribable m where
 -- the possible messages/actions on the data model of that channel
 data Subscribable m => SubMessage m = SMNewInstance m
                                     | SMNewInstances [m]
+                                    | SMDelInstance m
                                     | SMDelInstances (SubModelID m)
                                     | SMUpdateInstance m
                                     | SMDummy -- just used for return of cbSubscribe
@@ -42,6 +43,7 @@ data Subscribable m => SubMessage m = SMNewInstance m
 instance (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => ToJSON (SubMessage m) where
     toJSON (SMNewInstance m)    = object ["cmd" .= ("NewInstance" :: String), "value" .= m]
     toJSON (SMNewInstances ms)  = object ["cmd" .= ("NewInstances" :: String), "value" .= ms]
+    toJSON (SMDelInstance m)    = object ["cmd" .= ("DelInstance" :: String), "value" .= m]
     toJSON (SMDelInstances i)   = object ["cmd" .= ("DelInstances" :: String), "value" .= i]
     toJSON (SMUpdateInstance m) = object ["cmd" .= ("UpdateInstance" :: String), "value" .= m]
     toJSON SMDummy              = object ["cmd" .= ("Dummy" :: String), "value" .= ("" :: String)]
@@ -52,6 +54,7 @@ instance (Subscribable m, FromJSON m, FromJSON (SubModelID m)) => FromJSON (SubM
         c <- o .: "cmd"
         let parseValue "NewInstance"    = SMNewInstance    <$> o .: "value"
             parseValue "NewInstances"   = SMNewInstances   <$> o .: "value"
+            parseValue "DelInstance"    = SMDelInstance    <$> o .: "value"
             parseValue "DelInstances"   = SMDelInstances   <$> o .: "value"
             parseValue "UpdateInstance" = SMUpdateInstance <$> o .: "value"
             parseValue "Dummy"          = return SMDummy
@@ -63,6 +66,7 @@ safeHead (x:_) = Just x
 getSubModelId :: Subscribable m => SubMessage m -> Maybe (SubModelID m)
 getSubModelId (SMNewInstance m)    = Just $ subscribeModelId m
 getSubModelId (SMNewInstances ms)  = subscribeModelId <$> safeHead ms
+getSubModelId (SMDelInstance m)    = Just $ subscribeModelId m
 getSubModelId (SMDelInstances i)   = Just i
 getSubModelId (SMUpdateInstance m) = Just $ subscribeModelId m
 
