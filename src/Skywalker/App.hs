@@ -264,6 +264,35 @@ newResult mode = do
 onServer _ = ClientDummy
 #endif
 
+subscribeOnServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
+#if defined (ghcjs_HOST_OS)
+subscribeOnServer (Remote identifier mode args) cb = do
+    (nonce, mv) <- newResult mode
+    cid         <- ceClientId <$> ask
+    wsTVar      <- csWebSocket <$> get
+    ws          <- liftIO $ readTVarIO wsTVar
+    wsSt        <- liftIO $ getReadyState ws
+
+    let sendMsg ws = do
+            -- send the actual request and wait for the result
+            liftIO $ send (encode $ toJSON (nonce, identifier, cid, reverse args)) ws
+            forever $ do
+                res <- (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
+                liftIO $ cb res
+    if wsSt == Connecting || wsSt == OPEN
+    then sendMsg ws
+    else do
+        url <- ceUrl <$> ask
+        n <- csNonce <$> get
+        mvarDispCenter <- csDispCenter <$> get
+        newWs <- liftIO $ connect $ buildReq url mvarDispCenter
+        liftIO $ atomically $ writeTVar wsTVar newWs
+        liftIO $ forkIO $ pingServer wsTVar cid
+        sendMsg newWs
+#else
+subscribeOnServer _ _ = ClientDummy
+#endif
+
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS)
 runClient url env c = do
