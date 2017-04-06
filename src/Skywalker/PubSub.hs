@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, TypeFamilies, FlexibleContexts, UndecidableInstances, OverloadedStrings #-}
 module Skywalker.PubSub
-    (Subscribable(..), SubMessage(..),
+    (Subscribable(..), SubMessage(..), getSubModelId,
 #if !defined(ghcjs_HOST_OS)
     ChannelBuilder(..), buildChannel
 #endif
