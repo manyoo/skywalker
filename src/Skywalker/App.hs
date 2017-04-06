@@ -31,6 +31,8 @@ import Data.JSString hiding (reverse)
 data Connection
 
 #else
+import Control.Exception (SomeException, handle)
+
 import Network.WebSockets
 import Data.Aeson
 
@@ -390,9 +392,10 @@ sendToClient nonce res = do
     when (isJust connTVarM) $ do
         let connTVar = fromJust connTVarM
         conn <- liftIO $ readTVarIO connTVar
-        sendMessageToClient nonce res conn
+        void $ sendMessageToClient nonce res conn
 
-sendMessageToClient :: ToJSON a => Int -> a -> Connection -> Server ()
-sendMessageToClient nonce res conn = liftIO $ sendTextData conn $ encode (nonce, res)
-
+sendMessageToClient :: ToJSON a => Int -> a -> Connection -> Server Bool
+sendMessageToClient nonce res conn = liftIO $ handle handler $ sendTextData conn (encode (nonce, res)) >> return True
+    where handler :: SomeException -> IO Bool
+          handler _ = return False
 #endif

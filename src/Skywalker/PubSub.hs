@@ -8,6 +8,8 @@ module Skywalker.PubSub
 
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Default
 
 import Control.Concurrent.STM
@@ -118,6 +120,12 @@ delClientSubscriber ch cid sid = ch { csClientSubscribers = newMap }
           k = (cid, sid)
           newMap = Map.delete k m
 
+delClientSubscribers :: (Subscribable m, Ord (SubModelID m)) => ChannelSubscribers m -> [ClientSubscription m] -> ChannelSubscribers m
+delClientSubscribers ch css = ch { csClientSubscribers = newMap }
+    where m = csClientSubscribers ch
+          s = Set.fromList $ (\cs -> (csClientId cs, csSubModelId cs)) <$> css
+          newMap = Map.filterWithKey (\k _ -> k `Set.notMember` s) m
+
 findSubscribers :: Eq (SubModelID m) => ChannelSubscribers m -> ClientID -> SubModelID m -> [ClientSubscription m]
 findSubscribers ch cid sid = Map.elems $ Map.filter (validSubscriber cid sid) $ csClientSubscribers ch
 
@@ -147,9 +155,12 @@ buildChannel = do
             connVarM  <- ssConnection <$> get
             let sidM = getSubModelId msg
             when (isJust clientIdM && isJust connVarM && isJust sidM) $ do
-                m <- liftIO $ atomically $ readTVar channelTVar
-                let css = findSubscribers m (fromJust clientIdM) (fromJust sidM)
-                mapM_ (publishToClients msg) css
+                ch <- liftIO $ atomically $ readTVar channelTVar
+                let css = findSubscribers ch (fromJust clientIdM) (fromJust sidM)
+                resLst <- mapM (publishToClient msg) css
+                let csToDel = snd <$> filter (not . fst) resLst
+                    newCh = delClientSubscribers ch csToDel
+                liftIO $ atomically $ writeTVar channelTVar newCh
 
         unsub sid = do
             clientIdM <- seClientId <$> ask
@@ -159,9 +170,11 @@ buildChannel = do
                 writeTVar channelTVar newCh
     return $ ChannelBuilder sub pub unsub
 
-publishToClients :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server ()
-publishToClients msg cs = liftIO (readTVarIO connVar) >>= sendMessageToClient nonce msg
-    where nonce = csNonce cs
-          connVar = csConnection cs
-
+publishToClient :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server (Bool, ClientSubscription m)
+publishToClient msg cs = do
+    let nonce = csNonce cs
+        connVar = csConnection cs
+    conn <- liftIO $ readTVarIO connVar
+    res <- sendMessageToClient nonce msg conn
+    return (res, cs)
 #endif
