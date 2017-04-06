@@ -39,46 +39,51 @@ data Subscribable m => SubMessage m = SMNewInstance m
                                     | SMDelInstance m
                                     | SMDelInstances (SubModelID m)
                                     | SMUpdateInstance m
+                                    | SMUpdateInstances [m]
                                     | SMDummy -- just used for return of cbSubscribe
                                               -- because it's not actually used
 
 instance (Subscribable m, Show m) => Show (SubMessage m) where
-    show (SMNewInstance m)    = "SMNewInstance " ++ show m
-    show (SMNewInstances ms)  = "SMNewInstances " ++ show ms
-    show (SMDelInstance m)    = "SMDelInstance " ++ show m
-    show (SMDelInstances i)   = "SMDelInstances"
-    show (SMUpdateInstance m) = "SMUpdateInstance " ++ show m
-    show SMDummy              = "SMDummy"
+    show (SMNewInstance m)      = "SMNewInstance " ++ show m
+    show (SMNewInstances ms)    = "SMNewInstances " ++ show ms
+    show (SMDelInstance m)      = "SMDelInstance " ++ show m
+    show (SMDelInstances i)     = "SMDelInstances"
+    show (SMUpdateInstance m)   = "SMUpdateInstance " ++ show m
+    show (SMUpdateInstances ms) = "SMUpdateInstances " ++ show ms
+    show SMDummy                = "SMDummy"
 
 instance (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => ToJSON (SubMessage m) where
-    toJSON (SMNewInstance m)    = object ["cmd" .= ("NewInstance" :: String), "value" .= m]
-    toJSON (SMNewInstances ms)  = object ["cmd" .= ("NewInstances" :: String), "value" .= ms]
-    toJSON (SMDelInstance m)    = object ["cmd" .= ("DelInstance" :: String), "value" .= m]
-    toJSON (SMDelInstances i)   = object ["cmd" .= ("DelInstances" :: String), "value" .= i]
-    toJSON (SMUpdateInstance m) = object ["cmd" .= ("UpdateInstance" :: String), "value" .= m]
-    toJSON SMDummy              = object ["cmd" .= ("Dummy" :: String), "value" .= ("" :: String)]
+    toJSON (SMNewInstance m)      = object ["cmd" .= ("NewInstance" :: String), "value" .= m]
+    toJSON (SMNewInstances ms)    = object ["cmd" .= ("NewInstances" :: String), "value" .= ms]
+    toJSON (SMDelInstance m)      = object ["cmd" .= ("DelInstance" :: String), "value" .= m]
+    toJSON (SMDelInstances i)     = object ["cmd" .= ("DelInstances" :: String), "value" .= i]
+    toJSON (SMUpdateInstance m)   = object ["cmd" .= ("UpdateInstance" :: String), "value" .= m]
+    toJSON (SMUpdateInstances ms) = object ["cmd" .= ("UpdateInstances" :: String), "value" .= ms]
+    toJSON SMDummy                = object ["cmd" .= ("Dummy" :: String), "value" .= ("" :: String)]
 
 instance (Subscribable m, FromJSON m, FromJSON (SubModelID m)) => FromJSON (SubMessage m) where
     parseJSON v = do
         let o = toObject v
         c <- o .: "cmd"
-        let parseValue "NewInstance"    = SMNewInstance    <$> o .: "value"
-            parseValue "NewInstances"   = SMNewInstances   <$> o .: "value"
-            parseValue "DelInstance"    = SMDelInstance    <$> o .: "value"
-            parseValue "DelInstances"   = SMDelInstances   <$> o .: "value"
-            parseValue "UpdateInstance" = SMUpdateInstance <$> o .: "value"
-            parseValue "Dummy"          = return SMDummy
+        let parseValue "NewInstance"     = SMNewInstance    <$> o .: "value"
+            parseValue "NewInstances"    = SMNewInstances   <$> o .: "value"
+            parseValue "DelInstance"     = SMDelInstance    <$> o .: "value"
+            parseValue "DelInstances"    = SMDelInstances   <$> o .: "value"
+            parseValue "UpdateInstance"  = SMUpdateInstance <$> o .: "value"
+            parseValue "UpdateInstances" = SMUpdateInstances <$> o .: "value"
+            parseValue "Dummy"           = return SMDummy
         parseValue $ jsonString c
 
 safeHead []    = Nothing
 safeHead (x:_) = Just x
 
 getSubModelId :: Subscribable m => SubMessage m -> Maybe (SubModelID m)
-getSubModelId (SMNewInstance m)    = Just $ subscribeModelId m
-getSubModelId (SMNewInstances ms)  = subscribeModelId <$> safeHead ms
-getSubModelId (SMDelInstance m)    = Just $ subscribeModelId m
-getSubModelId (SMDelInstances i)   = Just i
-getSubModelId (SMUpdateInstance m) = Just $ subscribeModelId m
+getSubModelId (SMNewInstance m)      = Just $ subscribeModelId m
+getSubModelId (SMNewInstances ms)    = subscribeModelId <$> safeHead ms
+getSubModelId (SMDelInstance m)      = Just $ subscribeModelId m
+getSubModelId (SMDelInstances i)     = Just i
+getSubModelId (SMUpdateInstance m)   = Just $ subscribeModelId m
+getSubModelId (SMUpdateInstances ms) = subscribeModelId <$> safeHead ms
 
 #if !defined(ghcjs_HOST_OS)
 -- the three remote methods to be exposed to the client side
