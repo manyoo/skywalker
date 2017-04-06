@@ -40,6 +40,14 @@ data Subscribable m => SubMessage m = SMNewInstance m
                                     | SMDummy -- just used for return of cbSubscribe
                                               -- because it's not actually used
 
+instance (Subscribable m, Show m) => Show (SubMessage m) where
+    show (SMNewInstance m)    = "SMNewInstance " ++ show m
+    show (SMNewInstances ms)  = "SMNewInstances " ++ show ms
+    show (SMDelInstance m)    = "SMDelInstance " ++ show m
+    show (SMDelInstances i)   = "SMDelInstances"
+    show (SMUpdateInstance m) = "SMUpdateInstance " ++ show m
+    show SMDummy              = "SMDummy"
+
 instance (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => ToJSON (SubMessage m) where
     toJSON (SMNewInstance m)    = object ["cmd" .= ("NewInstance" :: String), "value" .= m]
     toJSON (SMNewInstances ms)  = object ["cmd" .= ("NewInstances" :: String), "value" .= ms]
