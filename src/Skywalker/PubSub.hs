@@ -88,13 +88,13 @@ getSubModelId (SMUpdateInstances ms) = subscribeModelId <$> safeHead ms
 #if !defined(ghcjs_HOST_OS)
 -- the three remote methods to be exposed to the client side
 data ChannelBuilder m = ChannelBuilder {
-    cbSubscribe   :: SubModelID m -> Server (SubMessage m),
-    cbPublish     :: SubMessage m -> Server (),
-    cbUnsubscribe :: SubModelID m -> Server ()
+    cbSubscribe       :: SubModelID m  -> Server (SubMessage m),
+    cbPublish         :: SubMessage m  -> Server (),
+    cbUnsubscribe     :: SubModelID m  -> Server (),
+    cbServerSubscribe :: (SubMessage m -> Server ()) -> IO ()
     }
 
--- data structures used for managing the subscription channles and clients
-
+-- data structures used for managing the subscription channels and clients
 data ClientSubscription m = ClientSubscription {
     csClientId   :: ClientID,
     csSubModelId :: SubModelID m,
@@ -102,13 +102,19 @@ data ClientSubscription m = ClientSubscription {
     csConnection :: TVar Connection
     }
 
--- this will store all clients for one channel
-newtype ChannelSubscribers m = ChannelSubscribers {
-    csClientSubscribers :: Map (ClientID, SubModelID m) (ClientSubscription m)
+-- data type used for managing the server side subscriptions
+newtype ServerSubscription m = ServerSubscription {
+    ssCallback :: SubMessage m -> Server ()
+    }
+
+-- this will store all subscribers for one channel
+data ChannelSubscribers m = ChannelSubscribers {
+    csClientSubscribers :: Map (ClientID, SubModelID m) (ClientSubscription m),
+    csServerSubscriber  :: Maybe (ServerSubscription m)
     }
 
 instance Default (ChannelSubscribers m) where
-    def = ChannelSubscribers Map.empty
+    def = ChannelSubscribers Map.empty Nothing
 
 addClientSubscriber :: (Subscribable m, Ord (SubModelID m)) => ChannelSubscribers m -> ClientSubscription m -> ChannelSubscribers m
 addClientSubscriber ch cs = ch { csClientSubscribers = newMap }
@@ -131,6 +137,9 @@ delClientSubscribers ch css = ch { csClientSubscribers = newMap }
           s = Set.fromList $ (\cs -> (csClientId cs, csSubModelId cs)) <$> css
           newMap = Map.filterWithKey (\k _ -> k `Set.notMember` s) m
 
+addServerSubscriber :: Subscribable m => ChannelSubscribers m -> ServerSubscription m -> ChannelSubscribers m
+addServerSubscriber ch ss = ch { csServerSubscriber = Just ss }
+
 findSubscribers :: Eq (SubModelID m) => ChannelSubscribers m -> ClientID -> SubModelID m -> [ClientSubscription m]
 findSubscribers ch cid sid = Map.elems $ Map.filter (validSubscriber cid sid) $ csClientSubscribers ch
 
@@ -140,40 +149,58 @@ validSubscriber cid sid cs = csClientId cs /= cid && csSubModelId cs == sid
 buildChannel :: (Subscribable m, ToJSON m, ToJSON (SubModelID m), Eq (SubModelID m), Ord (SubModelID m)) => IO (ChannelBuilder m)
 buildChannel = do
     channelTVar <- atomically $ newTVar def
-    let sub sid = do
-            clientIdM <- seClientId <$> ask
-            nonceM    <- seCurrentNonce <$> ask
-            connVarM  <- ssConnection <$> get
-            liftIO $ when (isJust clientIdM && isJust nonceM && isJust connVarM) $ atomically $ do
-                let cid    = fromJust clientIdM
-                    nonce  = fromJust nonceM
-                    conVar = fromJust connVarM
-                ch <- readTVar channelTVar
-                let cs = ClientSubscription cid sid nonce conVar
-                    newCh = addClientSubscriber ch cs
-                writeTVar channelTVar newCh
+    let sub   = mkClientSubscribeFunc channelTVar
+        pub   = mkClientPublishFunc channelTVar
+        unsub = mkClientUnsubscribeFunc channelTVar
+        sSub  = mkServerSubscribeFunc channelTVar
+    return $ ChannelBuilder sub pub unsub sSub
 
-            return SMDummy
+-- subscribe to a channel on client side
+mkClientSubscribeFunc channelTVar sid = do
+    clientIdM <- seClientId <$> ask
+    nonceM    <- seCurrentNonce <$> ask
+    connVarM  <- ssConnection <$> get
+    liftIO $ when (isJust clientIdM && isJust nonceM && isJust connVarM) $ atomically $ do
+        let cid    = fromJust clientIdM
+            nonce  = fromJust nonceM
+            conVar = fromJust connVarM
+        ch <- readTVar channelTVar
+        let cs = ClientSubscription cid sid nonce conVar
+            newCh = addClientSubscriber ch cs
+        writeTVar channelTVar newCh
 
-        pub msg = do
-            clientIdM <- seClientId <$> ask
-            connVarM  <- ssConnection <$> get
-            let sidM = getSubModelId msg
-            when (isJust clientIdM && isJust connVarM && isJust sidM) $ do
-                ch <- liftIO $ atomically $ readTVar channelTVar
-                let css = findSubscribers ch (fromJust clientIdM) (fromJust sidM)
-                resLst <- mapM (publishToClient msg) css
-                let csToDel = snd <$> filter (not . fst) resLst
-                    newCh = delClientSubscribers ch csToDel
-                liftIO $ atomically $ writeTVar channelTVar newCh
+    return SMDummy
 
-        unsub sid = do
-            clientIdM <- seClientId <$> ask
-            liftIO $ when (isJust clientIdM) $ atomically $ do
-                ch <- readTVar channelTVar
-                let newCh = delClientSubscriber ch (fromJust clientIdM) sid
-                writeTVar channelTVar newCh
-    return $ ChannelBuilder sub pub unsub
+-- subscribe to a channel on server side
+mkServerSubscribeFunc channelTVar cb = atomically $ do
+    ch <- readTVar channelTVar
+    writeTVar channelTVar $ addServerSubscriber ch (ServerSubscription cb)
+
+-- publish message on client side
+mkClientPublishFunc channelTVar msg = do
+    -- find all valid clients and publish to them
+    clientIdM <- seClientId <$> ask
+    connVarM  <- ssConnection <$> get
+    let sidM = getSubModelId msg
+    when (isJust clientIdM && isJust connVarM && isJust sidM) $ do
+        ch <- liftIO $ atomically $ readTVar channelTVar
+        let css = findSubscribers ch (fromJust clientIdM) (fromJust sidM)
+        resLst <- mapM (publishToClient msg) css
+        let csToDel = snd <$> filter (not . fst) resLst
+            newCh = delClientSubscribers ch csToDel
+        liftIO $ atomically $ writeTVar channelTVar newCh
+        
+        -- if there's server subscribers, call them
+        let serverSubM = csServerSubscriber ch
+        mapM_ (\ss -> (ssCallback ss) msg) serverSubM
+
+-- unsubscribe a channel on client side
+mkClientUnsubscribeFunc channelTVar sid = do
+    clientIdM <- seClientId <$> ask
+    liftIO $ when (isJust clientIdM) $ atomically $ do
+        ch <- readTVar channelTVar
+        let newCh = delClientSubscriber ch (fromJust clientIdM) sid
+        writeTVar channelTVar newCh
 
 publishToClient :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server (Bool, ClientSubscription m)
 publishToClient msg cs = do
