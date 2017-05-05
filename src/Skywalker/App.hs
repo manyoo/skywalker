@@ -250,7 +250,7 @@ onServer (Remote identifier mode args) = do
         mvarDispCenter <- csDispCenter <$> get
         newWs <- liftIO $ connect $ buildReq url mvarDispCenter
         liftIO $ atomically $ writeTVar wsTVar newWs
-        --liftIO $ forkIO $ pingServer wsTVar cid
+        liftIO $ forkIO $ pingServer wsTVar cid
         sendMsg newWs
 
 newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
@@ -289,7 +289,7 @@ subscribeOnServer (Remote identifier mode args) cb = do
         mvarDispCenter <- csDispCenter <$> get
         newWs <- liftIO $ connect $ buildReq url mvarDispCenter
         liftIO $ atomically $ writeTVar wsTVar newWs
-        --liftIO $ forkIO $ pingServer wsTVar cid
+        liftIO $ forkIO $ pingServer wsTVar cid
         sendMsg newWs
 #else
 subscribeOnServer _ _ = ClientDummy
@@ -305,7 +305,7 @@ runClient url env c = do
     mNonce <- liftIO $ atomically $ newTVar 1
     uid <- liftIO UUID.generateUUID
 
-    --liftIO $ forkIO (pingServer wsTVar uid)
+    liftIO $ forkIO (pingServer wsTVar uid)
 
     let defState = ClientState mNonce mvarDispCenter wsTVar
     liftIO $ runStateT (runReaderT c (ClientEnv url uid env)) defState
@@ -323,7 +323,7 @@ pingServer wsTVar cid = do
 
 buildReq url mvarDispCenter = WebSocketRequest {
     url = urlString url,
-    protocols = ["GHCJS.App"],
+    protocols = ["GHCJSApp"],
     onClose = Nothing,
     onMessage = Just (processServerMessage mvarDispCenter)
     }
@@ -373,7 +373,7 @@ onEvent mapping incoming = do
 websocketServer = undefined
 #else
 websocketServer remoteMapping pendingConn = do
-    conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJS.App") [])
+    conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJSApp") [])
     connTVar <- liftIO $ atomically $ newTVar conn
     websocketHandler remoteMapping connTVar
     -- fork a new thread to send 'ping' control messages to the client every 3 seconds
