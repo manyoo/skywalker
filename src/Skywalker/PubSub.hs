@@ -13,6 +13,7 @@ import qualified Data.Set as Set
 import Data.Default
 
 import Control.Concurrent.STM
+import Control.Concurrent.Chan
 
 import Skywalker.App
 import Skywalker.JSON
@@ -22,9 +23,10 @@ import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.Trans
 
+import Network.Wai.EventSource
+import Data.Binary.Builder
 import Data.Maybe
 
-import Network.WebSockets
 #endif
 
 -- Subscribable defines the class for all data models that can be used in
@@ -98,8 +100,7 @@ data ChannelBuilder m = ChannelBuilder {
 data ClientSubscription m = ClientSubscription {
     csClientId   :: ClientID,
     csSubModelId :: SubModelID m,
-    csNonce      :: Int,
-    csConnection :: TVar Connection
+    csNonce      :: Int
     }
 
 -- data type used for managing the server side subscriptions
@@ -159,13 +160,11 @@ buildChannel = do
 mkClientSubscribeFunc channelTVar sid = do
     clientIdM <- seClientId <$> ask
     nonceM    <- seCurrentNonce <$> ask
-    connVarM  <- ssConnection <$> get
-    liftIO $ when (isJust clientIdM && isJust nonceM && isJust connVarM) $ atomically $ do
+    liftIO $ when (isJust clientIdM && isJust nonceM) $ atomically $ do
         let cid    = fromJust clientIdM
             nonce  = fromJust nonceM
-            conVar = fromJust connVarM
         ch <- readTVar channelTVar
-        let cs = ClientSubscription cid sid nonce conVar
+        let cs = ClientSubscription cid sid nonce
             newCh = addClientSubscriber ch cs
         writeTVar channelTVar newCh
 
@@ -180,9 +179,8 @@ mkServerSubscribeFunc channelTVar cb = atomically $ do
 mkClientPublishFunc channelTVar msg = do
     -- find all valid clients and publish to them
     clientIdM <- seClientId <$> ask
-    connVarM  <- ssConnection <$> get
     let sidM = getSubModelId msg
-    when (isJust clientIdM && isJust connVarM && isJust sidM) $ do
+    when (isJust clientIdM && isJust sidM) $ do
         ch <- liftIO $ atomically $ readTVar channelTVar
         let css = findSubscribers ch (fromJust clientIdM) (fromJust sidM)
         resLst <- mapM (publishToClient msg) css
@@ -205,8 +203,14 @@ mkClientUnsubscribeFunc channelTVar sid = do
 publishToClient :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server (Bool, ClientSubscription m)
 publishToClient msg cs = do
     let nonce = csNonce cs
-        connVar = csConnection cs
-    conn <- liftIO $ readTVarIO connVar
-    res <- sendMessageToClient nonce msg conn
-    return (res, cs)
+        cid   = csClientId cs
+    sseChanMapTVarM <- seSSEChanMapTVar <$> ask
+    case sseChanMapTVarM of
+        Just sseChanMapTVar -> do
+            m <- liftIO $ readTVarIO sseChanMapTVar
+            let cm = Map.lookup cid m
+                msgStr = respBuilder nonce msg
+            liftIO $ mapM_ (\c -> writeChan c $ ServerEvent Nothing Nothing [fromLazyByteString msgStr]) cm
+            return (True, cs)
+        Nothing -> return (False, cs)
 #endif

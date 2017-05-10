@@ -10,7 +10,9 @@ import Control.Concurrent.STM
 import Data.Maybe (isJust, fromJust)
 import Data.Default
 
-import Data.ByteString hiding (reverse)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import Data.Map (Map)
 import qualified Data.Map as M
 
 import Skywalker.UUID (UUID)
@@ -22,19 +24,27 @@ import JavaScript.JSON.Types
 import JavaScript.JSON.Types.Class
 import JavaScript.JSON.Types.Internal
 import JavaScript.JSON.Types.Instances
-import JavaScript.Web.WebSocket
-import JavaScript.Web.MessageEvent
+import JavaScript.Web.XMLHttpRequest
+import qualified JavaScript.Web.MessageEvent as ME
 
 import Data.IORef
 import Data.JSString hiding (reverse)
+
+import Skywalker.EventSource
 -- a dummy websocket connection used only on server side
 data Connection
 
 #else
 import Control.Exception (SomeException, handle)
 
-import Network.WebSockets
+import Control.Concurrent.Chan
 import Data.Aeson
+import Data.Text
+import qualified Data.UUID as UUID
+import Skywalker.RestServer
+
+import Network.Wai
+import Network.Wai.EventSource
 
 data WebSocketRequest
 #endif
@@ -70,7 +80,7 @@ type MethodName = String
 type Nonce = Int
 
 -- a remote method is an IO action that accepts a list of JSON and return a JSON result
-type Method = [JSON] -> Server JSON
+type RemoteMethod = [JSON] -> Server JSON
 
 -- specify whether the remote method is execuated in a sync, async or subscription based way
 data MethodMode = MethodSync
@@ -79,7 +89,7 @@ data MethodMode = MethodSync
                 deriving Eq
 
 -- the state stored in the App monad, it is a map of all the defined remote functions
-type AppState = M.Map MethodName (MethodMode, Method)
+type AppState = M.Map MethodName (MethodMode, RemoteMethod)
 
 -- the top-level App monad for the whole app
 newtype App a = App { unApp :: StateT AppState IO a }
@@ -92,7 +102,7 @@ runApp = void . flip runStateT M.empty . unApp
 
 -- define a value that be used in remote functions
 class Remotable a where
-    mkRemote :: a -> Method
+    mkRemote :: a -> RemoteMethod
 
 instance (ToJSON a) => Remotable (Server a) where
     mkRemote m _ = fmap toJSON m
@@ -122,28 +132,25 @@ instance MonadIO Server where
 -- for a remote value, we just need to remember the MethodName and arguments for it
 data Remote a = Remote MethodName MethodMode [JSON]
 #else
--- Server Monad is just a wrapper over IO
-newtype ServerState = ServerState {
-    ssConnection :: Maybe (TVar Connection)
-    }
 
-instance Default ServerState where
-    def = ServerState Nothing
+type SSEChannelMap = Map ClientID (Chan ServerEvent)
 
 data ServerEnv = ServerEnv {
-    seClientId     :: Maybe ClientID,
-    seCurrentNonce :: Maybe Int
+    seClientId       :: Maybe ClientID,
+    seCurrentNonce   :: Maybe Int,
+    seSSEChanMapTVar :: Maybe (TVar SSEChannelMap)
     }
 
 instance Default ServerEnv where
-    def = ServerEnv Nothing Nothing
+    def = ServerEnv Nothing Nothing Nothing
 
-type Server a = ReaderT ServerEnv (StateT ServerState IO) a
+type Server a = ReaderT ServerEnv IO a
 
-runServerM e st = flip evalStateT st . flip runReaderT e
+runServerM e = flip runReaderT e
 
 -- remote values are not interested on the server side either
 data Remote a = RemoteDummy
+
 #endif
 
 (<.>) :: ToJSON a => Remote (a -> b) -> a -> Remote b
@@ -189,8 +196,7 @@ liftServerIO m = return <$> liftIO m
 type DispatchCenter = M.Map Nonce (MethodMode, MVar JSON)
 data ClientState = ClientState {
     csNonce      :: TVar Nonce,
-    csDispCenter :: TVar DispatchCenter,
-    csWebSocket  :: TVar WebSocket
+    csDispCenter :: TVar DispatchCenter
     }
 
 -- define a client environment type with a websocket as well as a variable type
@@ -232,36 +238,30 @@ getClientEnv = undefined
 onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
 #if defined(ghcjs_HOST_OS)
 onServer (Remote identifier mode args) = do
-    (nonce, mv) <- newResult mode
-    cid         <- ceClientId <$> ask
-    wsTVar      <- csWebSocket <$> get
-    ws          <- liftIO $ readTVarIO wsTVar
-    wsSt        <- liftIO $ getReadyState ws
+    cid <- ceClientId <$> ask
+    nonce <- nextNonce
 
-    let sendMsg ws = do
-            -- send the actual request and wait for the result
-            liftIO $ send (encode $ toJSON (nonce, identifier, cid, reverse args)) ws
-            (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
-    if wsSt == Connecting || wsSt == OPEN
-    then sendMsg ws
-    else do
-        url <- ceUrl <$> ask
-        n <- csNonce <$> get
-        mvarDispCenter <- csDispCenter <$> get
-        newWs <- liftIO $ connect $ buildReq url mvarDispCenter
-        liftIO $ atomically $ writeTVar wsTVar newWs
-        liftIO $ forkIO $ pingServer wsTVar cid
-        sendMsg newWs
+    json <- liftIO $ xhrJSON nonce identifier cid args
 
-newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
-newResult mode = do
-    (ClientState mNonce mvarDispCenter ws) <- get
-    mv <- liftIO newEmptyMVar
-    nonce <- liftIO $ readTVarIO mNonce
-    liftIO $ atomically $ do
-        modifyTVar' mvarDispCenter (\m -> M.insert nonce (mode, mv) m)
-        writeTVar mNonce (nonce + 1)
-    return (nonce, mv)
+    let Success (nonce :: Int, result :: JSON) = fromJSON json
+    return $ fromResult $ fromJSON result
+
+
+xhrJSON nonce identifier cid args = do
+    let dat = encode $ toJSON (nonce, identifier, cid, reverse args)
+        
+        req = Request { reqMethod          = POST,
+                        reqURI             = "/swapi/swremote",
+                        reqLogin           = Nothing,
+                        reqHeaders         = [],
+                        reqWithCredentials = False,
+                        reqData            = StringData dat
+                      }
+    -- send the actual request and wait for the result
+    jsonResp <- fmap parseJSONString <$> xhr req
+    let (Just json) = contents jsonResp
+    return json
+
 #else
 onServer _ = ClientDummy
 #endif
@@ -271,76 +271,60 @@ subscribeOnServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Serve
 subscribeOnServer (Remote identifier mode args) cb = do
     (nonce, mv) <- newResult mode
     cid         <- ceClientId <$> ask
-    wsTVar      <- csWebSocket <$> get
-    ws          <- liftIO $ readTVarIO wsTVar
-    wsSt        <- liftIO $ getReadyState ws
+    n           <- csNonce    <$> get
 
-    let sendMsg ws = do
-            -- send the actual request and wait for the result
-            liftIO $ send (encode $ toJSON (nonce, identifier, cid, reverse args)) ws
-            forever $ do
-                res <- (fromResult . fromJSON) <$> (liftIO $ takeMVar mv)
-                liftIO $ cb res
-    if wsSt == Connecting || wsSt == OPEN
-    then sendMsg ws
-    else do
-        url <- ceUrl <$> ask
-        n <- csNonce <$> get
-        mvarDispCenter <- csDispCenter <$> get
-        newWs <- liftIO $ connect $ buildReq url mvarDispCenter
-        liftIO $ atomically $ writeTVar wsTVar newWs
-        liftIO $ forkIO $ pingServer wsTVar cid
-        sendMsg newWs
+    -- send the actual request and wait for the result
+    liftIO $ xhrJSON nonce identifier cid args
+
+    liftIO $ forever $ do
+        res <- (fromResult . fromJSON) <$> takeMVar mv
+        cb res
+
+
+newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
+newResult mode = do
+    (ClientState mNonce mvarDispCenter) <- get
+    mv <- liftIO newEmptyMVar
+    nonce <- liftIO $ readTVarIO mNonce
+    liftIO $ atomically $ do
+        modifyTVar' mvarDispCenter (\m -> M.insert nonce (mode, mv) m)
+        writeTVar mNonce (nonce + 1)
+    return (nonce, mv)
+
+nextNonce :: (Monad m, MonadIO m) => Client t m Nonce
+nextNonce = do
+    (ClientState mNonce _) <- get
+    nonce <- liftIO $ readTVarIO mNonce
+    liftIO $ atomically $ writeTVar mNonce (nonce + 1)
+    return nonce
+
 #else
 subscribeOnServer _ _ = ClientDummy
 #endif
 
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS)
-runClient url env c = do
-    mvarDispCenter <- liftIO $ atomically $ newTVar M.empty
-    let req = buildReq url mvarDispCenter
-    ws <- liftIO $ connect req
-    wsTVar <- liftIO $ atomically $ newTVar ws
-    mNonce <- liftIO $ atomically $ newTVar 1
-    uid <- liftIO UUID.generateUUID
+runClient url env c = liftIO $ do
+    mvarDispCenter <- atomically $ newTVar M.empty
+    mNonce <- atomically $ newTVar 1
+    cid <- UUID.generateUUID
 
-    liftIO $ forkIO (pingServer wsTVar uid)
+    es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
+    onMessage (onServerMessage mvarDispCenter) es
 
-    let defState = ClientState mNonce mvarDispCenter wsTVar
-    liftIO $ runStateT (runReaderT c (ClientEnv url uid env)) defState
+    let defState = ClientState mNonce mvarDispCenter
+    runStateT (runReaderT c (ClientEnv url cid env)) defState
+
     return AppDone
 
-pingServer wsTVar cid = do
-    ws <- readTVarIO wsTVar
-    wsSt <- getReadyState ws
-    if wsSt == Connecting || wsSt == OPEN
-        then do
-        send (encode $ toJSON (0 :: Int, "ping" :: String, cid, [] :: [Int])) ws
-        threadDelay 3000000
-        pingServer wsTVar cid
-        else return ()
-
-buildReq url mvarDispCenter = WebSocketRequest {
-    url = urlString url,
-    protocols = ["GHCJSApp"],
-    onClose = Nothing,
-    onMessage = Just (processServerMessage mvarDispCenter)
-    }
-
-processServerMessage mvarDispCenter evt = do
-    -- only string data is supported, if it fails, it's a bug in the framework
-    let StringData d = getData evt
-    onServerMessage mvarDispCenter $ parseJSONString d
-
-onServerMessage mvarDispCenter response = do
-    let res = fromJSON response
+onServerMessage mvarDispCenter e = do
+    let ME.StringData msg = ME.getData e
+        res = fromJSON $ parseJSONString msg
     case res of
         Success (nonce :: Int, result :: JSON) -> do
             m <- readTVarIO mvarDispCenter
             let (mode, mv) = m M.! nonce
             putMVar mv result
-            when (mode /= MethodSubscribe) $ atomically $ writeTVar mvarDispCenter (M.delete nonce m)
         Error e -> print e
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
@@ -349,53 +333,56 @@ foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString
 runClient _ _ _ = return AppDone
 #endif
 
--- start the websocket server with db param, file path for static assets and port
-onEvent :: M.Map MethodName (MethodMode, Method) -> JSON -> Server ()
+onEvent :: M.Map MethodName (MethodMode, RemoteMethod) -> JSON -> Server LBS.ByteString
 #if defined(ghcjs_HOST_OS)
 onEvent _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
 onEvent mapping incoming = do
     let Success (nonce :: Int, identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
-    unless (nonce == 0 && identifier == "ping") $ do
-        let Just (m, f) = M.lookup identifier mapping
-            processEvt = f args >>= sendToClient nonce
-            processSub = void $ f args
-            newEnv = ServerEnv (Just cid) (Just nonce)
-        st <- get
-        case m of
-            MethodSync -> processEvt
-            MethodAsync -> liftIO $ void $ forkIO $ runServerM newEnv st processEvt
-            MethodSubscribe -> liftIO $ void $ forkIO $ runServerM newEnv st processSub
+    e <- ask
+    let Just (m, f) = M.lookup identifier mapping
+        processEvt = f args >>= (return . respBuilder nonce)
+        processSub = void $ f args
+        newEnv = e { seClientId     = Just cid,
+                     seCurrentNonce = Just nonce
+                   }
+    case m of
+        MethodSync -> processEvt
+        MethodAsync -> processEvt
+        MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder nonce ([] :: [Int]))
 #endif
 
 #if defined(ghcjs_HOST_OS)
-websocketServer = undefined
+skywalkerServer = undefined
 #else
-websocketServer remoteMapping pendingConn = do
-    conn <- acceptRequestWith pendingConn (AcceptRequest (Just "GHCJSApp") [])
-    connTVar <- liftIO $ atomically $ newTVar conn
-    websocketHandler remoteMapping connTVar
-    -- fork a new thread to send 'ping' control messages to the client every 3 seconds
-    forkPingThread conn 3
+skywalkerServer remoteMapping sseChannelMapTVar backupApp =
+    restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping sseChannelMapTVar)]) $
+        sseApp "swsse" sseChannelMapTVar backupApp    
 
-websocketHandler remoteMapping connTVar = do
-    conn <- readTVarIO connTVar
-    msg <- receiveData conn
+swRestApp remoteMapping sseChannelMapTVar req = do
+    msg <- lazyRequestBody req
     let Just (m :: JSON) = decode msg
-    runServerM def (ServerState (Just connTVar)) $ onEvent remoteMapping m
-    websocketHandler remoteMapping connTVar
+    runServerM (def {seSSEChanMapTVar = Just sseChannelMapTVar }) $ onEvent remoteMapping m
 
-sendToClient :: ToJSON a => Int -> a -> Server ()
-sendToClient nonce res = do
-    connTVarM <- ssConnection <$> get
-    when (isJust connTVarM) $ do
-        let connTVar = fromJust connTVarM
-        conn <- liftIO $ readTVarIO connTVar
-        void $ sendMessageToClient nonce res conn
+buildSSEChannelMapTVar :: IO (TVar SSEChannelMap)
+buildSSEChannelMapTVar = newTVarIO M.empty
 
-sendMessageToClient :: ToJSON a => Int -> a -> Connection -> Server Bool
-sendMessageToClient nonce res conn = liftIO $ handle handler $ sendTextData conn (encode (nonce, res)) >> return True
-    where handler :: SomeException -> IO Bool
-          handler _ = return False
+-- build Server Sent Event Application
+sseApp :: Text -> TVar SSEChannelMap -> Application -> Application
+sseApp endPoint sseChannelMapTVar backupApp req sendResponses = do
+    let p = safeHead $ pathInfo req
+        safeHead []    = Nothing
+        safeHead (a:_) = Just a
+        clientIdM = join $ lookup "clientId" $ queryString req
+    if p == Just endPoint && isJust clientIdM
+        then do
+            let cid = fromJust $ join $ (UUID.fromByteString . LBS.fromStrict) <$> clientIdM
+            c <- newChan
+            atomically $ modifyTVar sseChannelMapTVar (M.alter (const $ Just c) cid)
+            eventSourceAppChan c req sendResponses
+        else backupApp req sendResponses
+
+respBuilder :: ToJSON a => Int -> a -> LBS.ByteString
+respBuilder nonce res = encode (nonce, res)
 #endif
