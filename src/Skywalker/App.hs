@@ -348,8 +348,8 @@ onEvent mapping incoming = do
                      seCurrentNonce = Just nonce
                    }
     case m of
-        MethodSync -> processEvt
-        MethodAsync -> processEvt
+        MethodSync -> liftIO $ runServerM newEnv processEvt
+        MethodAsync -> liftIO $ runServerM newEnv processEvt
         MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder nonce ([] :: [Int]))
 #endif
 
