@@ -32,9 +32,6 @@ import Data.IORef
 import Data.JSString hiding (reverse)
 
 import Skywalker.EventSource
--- a dummy websocket connection used only on server side
-data Connection
-
 #else
 import Control.Exception (SomeException, handle)
 
