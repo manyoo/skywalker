@@ -11,6 +11,7 @@ import Data.Maybe (isJust, fromJust)
 import Data.Default
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -377,8 +378,11 @@ sseApp endPoint sseChannelMapTVar backupApp req sendResponses = do
         clientIdM = join $ lookup "clientId" $ queryString req
     if p == Just endPoint && isJust clientIdM
         then do
-            let cid = fromJust $ join $ (UUID.fromByteString . LBS.fromStrict) <$> clientIdM
+            let cid = fromJust $ join $ (UUID.fromString . Char8.unpack) <$> clientIdM
             c <- newChan
+            forkIO $ do
+                threadDelay 1000
+                writeChan c $ RetryEvent 1000
             atomically $ modifyTVar sseChannelMapTVar (M.alter (const $ Just c) cid)
             eventSourceAppChan c req sendResponses
         else backupApp req sendResponses
