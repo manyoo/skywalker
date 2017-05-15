@@ -81,8 +81,7 @@ type Nonce = Int
 type RemoteMethod = [JSON] -> Server JSON
 
 -- specify whether the remote method is execuated in a sync, async or subscription based way
-data MethodMode = MethodSync
-                | MethodAsync
+data MethodMode = MethodAsync
                 | MethodSubscribe
                 deriving Eq
 
@@ -160,10 +159,7 @@ _ <.> _ = RemoteDummy
 
 -- convert a Remotable value to a Remote
 remote :: Remotable a => MethodName -> a -> App (Remote a)
-remote = remoteWithMode MethodSync
-
-asyncRemote :: Remotable a => MethodName -> a -> App (Remote a)
-asyncRemote = remoteWithMode MethodAsync
+remote = remoteWithMode MethodAsync
 
 remoteChannel :: Remotable a => MethodName -> a -> App (Remote a)
 remoteChannel = remoteWithMode MethodSubscribe
@@ -346,7 +342,6 @@ onEvent mapping incoming = do
                      seCurrentNonce = Just nonce
                    }
     case m of
-        MethodSync -> liftIO $ runServerM newEnv processEvt
         MethodAsync -> liftIO $ runServerM newEnv processEvt
         MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder nonce ([] :: [Int]))
 #endif
