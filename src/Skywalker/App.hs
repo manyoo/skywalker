@@ -60,7 +60,7 @@ type JSON = Value
 
 fromResult :: Result a -> a
 fromResult (Success a) = a
-fromResult _ = undefined
+fromResult (Error e) = error e
 
 -- a special data type for forcing the use of runClient as the last
 -- operation in App monad
