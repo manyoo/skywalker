@@ -229,17 +229,16 @@ getClientEnv = ceCustom <$> ask
 getClientEnv = undefined
 #endif
 
-onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
+onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
 #if defined(ghcjs_HOST_OS)
-onServer (Remote identifier mode args) done = do
+onServer (Remote identifier mode args) = do
     cid <- ceClientId <$> ask
     nonce <- nextNonce
 
-    void $ liftIO $ forkIO $ do
-        json <- xhrJSON nonce identifier cid args
+    json <- liftIO $ xhrJSON nonce identifier cid args
 
-        let Success (nonce :: Int, result :: JSON) = fromJSON json
-        done (fromResult $ fromJSON result)
+    let Success (nonce :: Int, result :: JSON) = fromJSON json
+    return (fromResult $ fromJSON result)
 
 -- data type and functions to break the onServer into two parts so that
 -- users can has lower level control on API requests
@@ -276,7 +275,7 @@ xhrJSON nonce identifier cid args = do
     return json
 
 #else
-onServer _ _ = return ()
+onServer _ = ClientDummy
 #endif
 
 subscribeOnServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
