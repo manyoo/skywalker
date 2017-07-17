@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP #-}
 module Skywalker.StaticApp (
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
   staticApp, defaultFileServerSettings, ssIndices, unsafeToPiece, run, gzip,
   gzipFiles, GzipFiles(..),
 #else
@@ -12,7 +12,7 @@ module Skywalker.StaticApp (
   defaultGZipSettings
   ) where
 
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 -- define the stub functions and data types.
 -- these functions and data are used in the code available
 -- to both server and client. But it's never actually used

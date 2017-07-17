@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP #-}
 module Skywalker.Pool (
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
     Pool,
     createPool
 #else
@@ -8,7 +8,7 @@ module Skywalker.Pool (
 #endif
   ) where
 
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 data Pool a
 createPool = undefined
 #else

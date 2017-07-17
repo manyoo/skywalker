@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP, TypeFamilies, FlexibleContexts, UndecidableInstances, OverloadedStrings #-}
 module Skywalker.PubSub
     (Subscribable(..), SubMessage(..), getSubModelId,
-#if !defined(ghcjs_HOST_OS)
+#if !defined(ghcjs_HOST_OS) && !defined(client)
     ChannelBuilder(..), buildChannel
 #endif
     ) where
@@ -18,7 +18,7 @@ import Control.Concurrent.Chan
 import Skywalker.App
 import Skywalker.JSON
 
-#if !defined(ghcjs_HOST_OS)
+#if !defined(ghcjs_HOST_OS) && !defined(client)
 import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.Trans
@@ -87,7 +87,7 @@ getSubModelId (SMDelInstances i)     = Just i
 getSubModelId (SMUpdateInstance m)   = Just $ subscribeModelId m
 getSubModelId (SMUpdateInstances ms) = subscribeModelId <$> safeHead ms
 
-#if !defined(ghcjs_HOST_OS)
+#if !defined(ghcjs_HOST_OS) && !defined(client)
 -- the three remote methods to be exposed to the client side
 data ChannelBuilder m = ChannelBuilder {
     cbSubscribe       :: SubModelID m  -> Server (SubMessage m),

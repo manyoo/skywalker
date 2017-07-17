@@ -13,6 +13,9 @@ build-type:          Simple
 -- extra-source-files:
 cabal-version:       >=1.10
 
+Flag client
+  default: False
+
 library
   hs-source-dirs:      src
   exposed-modules:     Skywalker.App,
@@ -30,7 +33,7 @@ library
                        data-default,
                        stm
   default-language:    Haskell2010
-  if !impl(ghcjs)
+  if !impl(ghcjs) && !flag(client)
      exposed-modules:  Skywalker.RestServer
      build-depends:    aeson,
                        resource-pool,
@@ -43,11 +46,17 @@ library
                        postgresql-simple,
                        text,
                        uuid
-  else
+  if impl(ghcjs)
      js-sources:       javascript/uuid.js
      exposed-modules:  Skywalker.EventSource
      build-depends:    ghcjs-base,
                        uuid-types
+  if flag(client)
+    build-depends:     aeson,
+                       uuid,
+                       text,
+                       http-conduit
+    cpp-options:       -Dclient
 
 test-suite skywalker-test
   type:                exitcode-stdio-1.0

@@ -32,6 +32,14 @@ import Data.IORef
 import Data.JSString hiding (reverse)
 
 import Skywalker.EventSource
+#elif defined(client)
+
+import Data.IORef
+import Data.Aeson
+import Data.Text hiding (reverse, concat)
+
+import Network.HTTP.Simple (parseRequest, setRequestBodyJSON, httpJSON, getResponseBody)
+
 #else
 import Control.Exception (SomeException, handle)
 
@@ -43,8 +51,6 @@ import Skywalker.RestServer
 
 import Network.Wai
 import Network.Wai.EventSource
-
-data WebSocketRequest
 #endif
 
 newtype URL = URL {
@@ -108,7 +114,7 @@ instance (FromJSON a, Remotable b) => Remotable (a -> b) where
     mkRemote f (x:xs) = mkRemote (f jx) xs
         where Success jx = fromJSON x
 
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 -- on the client side, we don't care about Server values, so it's just a dummy value
 data Server a = ServerDummy
 
@@ -151,7 +157,7 @@ data Remote a = RemoteDummy
 #endif
 
 (<.>) :: ToJSON a => Remote (a -> b) -> a -> Remote b
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 (Remote name mode args) <.> arg = Remote name mode (toJSON arg : args)
 #else
 _ <.> _ = RemoteDummy
@@ -165,7 +171,7 @@ remoteChannel :: Remotable a => MethodName -> a -> App (Remote a)
 remoteChannel = remoteWithMode MethodSubscribe
 
 remoteWithMode :: Remotable a => MethodMode -> MethodName -> a -> App (Remote a)
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 -- client side, just remember the name in the Remote value
 remoteWithMode m n _ = return (Remote n m [])
 #else
@@ -179,14 +185,14 @@ remoteWithMode m n f = do
 
 -- lift a server side action into the App monad, only takes effect server side
 liftServerIO :: IO a -> App (Server a)
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 liftServerIO _ = return ServerDummy
 #else
 liftServerIO m = return <$> liftIO m
 #endif
 
 -- Client side definition
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 type DispatchCenter = M.Map Nonce (MethodMode, MVar JSON)
 data ClientState = ClientState {
     csNonce      :: TVar Nonce,
@@ -223,19 +229,20 @@ instance Monad m => MonadIO (Client e m) where
 
 -- get the custom environment data inside Client monad
 getClientEnv :: Monad m => Client e m e
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 getClientEnv = ceCustom <$> ask
 #else
 getClientEnv = undefined
 #endif
 
 onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 onServer (Remote identifier mode args) = do
+    url <- ceUrl <$> ask
     cid <- ceClientId <$> ask
     nonce <- nextNonce
 
-    json <- liftIO $ xhrJSON nonce identifier cid args
+    json <- liftIO $ xhrJSON url nonce identifier cid args
 
     let Success (nonce :: Int, result :: JSON) = fromJSON json
     return (fromResult $ fromJSON result)
@@ -243,23 +250,25 @@ onServer (Remote identifier mode args) = do
 -- data type and functions to break the onServer into two parts so that
 -- users can has lower level control on API requests
 data APIParam = APIParam {
+    apiURL        :: URL,
     apiIdentifier :: MethodName,
     apiClientId   :: ClientID,
     apiArguments  :: [JSON]
     }
 
-mkAPIParam :: Remote (Server a) -> ClientID -> APIParam
-mkAPIParam (Remote identifier mode args) cid = APIParam identifier cid args
+mkAPIParam :: Remote (Server a) -> ClientID -> URL -> APIParam
+mkAPIParam (Remote identifier mode args) cid url = APIParam url identifier cid args
 
 processAPIParam :: APIParam -> IO JSON
-processAPIParam (APIParam identifier cid args) = do
-    json <- xhrJSON 0 identifier cid args
+processAPIParam (APIParam url identifier cid args) = do
+    json <- xhrJSON url 0 identifier cid args
 
     let Success (n :: Int, result :: JSON) = fromJSON json
     return result
 
-xhrJSON :: Nonce -> MethodName -> ClientID -> [JSON] -> IO JSON
-xhrJSON nonce identifier cid args = do
+xhrJSON :: URL -> Nonce -> MethodName -> ClientID -> [JSON] -> IO JSON
+#if defined(ghcjs_HOST_OS)
+xhrJSON url nonce identifier cid args = do
     let dat = encode $ toJSON (nonce, identifier, cid, reverse args)
         
         req = Request { reqMethod          = POST,
@@ -273,20 +282,28 @@ xhrJSON nonce identifier cid args = do
     jsonResp <- fmap parseJSONString <$> xhr req
     let (Just json) = contents jsonResp
     return json
+#elif defined(client)
+xhrJSON url nonce identifier cid args = do
+    req' <- parseRequest $ concat ["POST ", urlString url, "/swapi/swremote"]
+    let req = setRequestBodyJSON (nonce, identifier, cid, reverse args) req'
+    jsonResp <- httpJSON req
+    return $ getResponseBody jsonResp
+#endif
 
 #else
 onServer _ = ClientDummy
 #endif
 
 subscribeOnServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
-#if defined (ghcjs_HOST_OS)
+#if defined (ghcjs_HOST_OS) || defined(client)
 subscribeOnServer (Remote identifier mode args) cb = do
     (nonce, mv) <- newResult mode
+    url         <- ceUrl <$> ask
     cid         <- ceClientId <$> ask
     n           <- csNonce    <$> get
 
     -- send the actual request and wait for the result
-    liftIO $ xhrJSON nonce identifier cid args
+    liftIO $ xhrJSON url nonce identifier cid args
 
     liftIO $ forever $ do
         res <- (fromResult . fromJSON) <$> takeMVar mv
@@ -315,20 +332,23 @@ subscribeOnServer _ _ = ClientDummy
 #endif
 
 runClient :: URL -> e -> Client e IO a -> App AppDone
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 runClient url env c = liftIO $ do
     mvarDispCenter <- atomically $ newTVar M.empty
     mNonce <- atomically $ newTVar 1
     cid <- UUID.generateUUID
 
+#if defined(ghcjs_HOST_OS)
     es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
     onMessage (onServerMessage mvarDispCenter) es
+#endif
 
     let defState = ClientState mNonce mvarDispCenter
     runStateT (runReaderT c (ClientEnv url cid env)) defState
 
     return AppDone
 
+#if defined(ghcjs_HOST_OS)
 onServerMessage mvarDispCenter e = do
     let ME.StringData msg = ME.getData e
         res = fromJSON $ parseJSONString msg
@@ -341,12 +361,14 @@ onServerMessage mvarDispCenter e = do
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
 foreign import javascript unsafe "JSON['parse']($1)" parseJSONString :: JSString -> JSON
+#endif
+
 #else
 runClient _ _ _ = return AppDone
 #endif
 
 onEvent :: M.Map MethodName (MethodMode, RemoteMethod) -> JSON -> Server LBS.ByteString
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 onEvent _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
@@ -364,7 +386,7 @@ onEvent mapping incoming = do
         MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder nonce ([] :: [Int]))
 #endif
 
-#if defined(ghcjs_HOST_OS)
+#if defined(ghcjs_HOST_OS) || defined(client)
 skywalkerServer = undefined
 #else
 skywalkerServer remoteMapping sseChannelMapTVar backupApp =
