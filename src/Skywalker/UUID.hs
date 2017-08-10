@@ -17,16 +17,16 @@ foreign import javascript unsafe "window['generateUUID']()"
 genUUID :: IO String
 genUUID = unpack <$> js_generateUUID
 
-#else
-import Data.UUID
-import qualified Data.UUID.V4 as V4
-#endif
-
 instance ToJSON UUID where
     toJSON = toJSON . toString
 
 instance FromJSON UUID where
     parseJSON = fmap (fromJust . fromString) . parseJSON
+
+#else
+import Data.UUID
+import qualified Data.UUID.V4 as V4
+#endif
 
 generateUUID :: IO UUID
 #if defined(ghcjs_HOST_OS)
