@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances #-}
 module Skywalker.App where
 
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Control.Monad.Reader
 import Control.Monad.IO.Class
 import Control.Concurrent
@@ -53,6 +53,8 @@ import Network.Wai
 import Network.Wai.EventSource
 #endif
 
+import Skywalker.StaticApp
+
 newtype URL = URL {
 #if defined(ghcjs_HOST_OS)
     urlString :: JSString
@@ -77,11 +79,6 @@ type ClientID = UUID
 
 -- MethodName is the name of a remote server function available to the client side.
 type MethodName = String
-
--- Nonce is a tag used represent a specific remote function call, because each
--- client can call the same remote function any times and we need to distinguish
--- between each call
-type Nonce = Int
 
 -- a remote method is an IO action that accepts a list of JSON and return a JSON result
 type RemoteMethod = [JSON] -> Server JSON
@@ -140,12 +137,11 @@ type SSEChannelMap = Map ClientID (Chan ServerEvent)
 
 data ServerEnv = ServerEnv {
     seClientId       :: Maybe ClientID,
-    seCurrentNonce   :: Maybe Int,
     seSSEChanMapTVar :: Maybe (TVar SSEChannelMap)
     }
 
 instance Default ServerEnv where
-    def = ServerEnv Nothing Nothing Nothing
+    def = ServerEnv Nothing Nothing
 
 type Server a = ReaderT ServerEnv IO a
 
@@ -193,12 +189,6 @@ liftServerIO m = return <$> liftIO m
 
 -- Client side definition
 #if defined(ghcjs_HOST_OS) || defined(client)
-type DispatchCenter = M.Map Nonce (MethodMode, MVar JSON)
-data ClientState = ClientState {
-    csNonce      :: TVar Nonce,
-    csDispCenter :: TVar DispatchCenter
-    }
-
 -- define a client environment type with a websocket as well as a variable type
 data ClientEnv a = ClientEnv {
     ceUrl      :: URL,
@@ -207,7 +197,7 @@ data ClientEnv a = ClientEnv {
     }
 -- a (Client m e a) monad value means a monad with (ClientEnv e) environment,
 -- ClientState state, a monad m inside and return value a
-type Client e m = ReaderT (ClientEnv e) (StateT ClientState m)
+type Client e m = ReaderT (ClientEnv e) m
 #else
 data Client e m a where
     ClientDummy :: Monad m => Client e m a
@@ -235,16 +225,23 @@ getClientEnv = ceCustom <$> ask
 getClientEnv = undefined
 #endif
 
-onServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
+class (Monad c, MonadIO c) => IsClient c where
+    onServer :: (FromJSON a, ToJSON a) => Remote (Server a) -> c a
+    subscribeOnServer :: (FromJSON a, ToJSON a) => Remote (Server a) -> (a -> IO ()) -> c ()
+
+instance (Monad m, MonadIO m) => IsClient (Client e m) where
+    onServer = onServerF
+    subscribeOnServer = subscribeOnServerF
+
+onServerF :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> Client e m a
 #if defined(ghcjs_HOST_OS) || defined(client)
-onServer (Remote identifier mode args) = do
+onServerF (Remote identifier mode args) = do
     url <- ceUrl <$> ask
     cid <- ceClientId <$> ask
-    nonce <- nextNonce
 
-    json <- liftIO $ xhrJSON url nonce identifier cid args
+    json <- liftIO $ xhrJSON url identifier cid args
 
-    let Success (nonce :: Int, result :: JSON) = fromJSON json
+    let Success (result :: JSON) = fromJSON json
     return (fromResult $ fromJSON result)
 
 -- data type and functions to break the onServer into two parts so that
@@ -261,15 +258,15 @@ mkAPIParam (Remote identifier mode args) cid url = APIParam url identifier cid a
 
 processAPIParam :: APIParam -> IO JSON
 processAPIParam (APIParam url identifier cid args) = do
-    json <- xhrJSON url 0 identifier cid args
+    json <- xhrJSON url identifier cid args
 
     let Success (n :: Int, result :: JSON) = fromJSON json
     return result
 
-xhrJSON :: URL -> Nonce -> MethodName -> ClientID -> [JSON] -> IO JSON
+xhrJSON :: URL -> MethodName -> ClientID -> [JSON] -> IO JSON
 #if defined(ghcjs_HOST_OS)
-xhrJSON url nonce identifier cid args = do
-    let dat = encode $ toJSON (nonce, identifier, cid, reverse args)
+xhrJSON url identifier cid args = do
+    let dat = encode $ toJSON (identifier, cid, reverse args)
         
         req = Request { reqMethod          = POST,
                         reqURI             = "/swapi/swremote",
@@ -283,80 +280,54 @@ xhrJSON url nonce identifier cid args = do
     let (Just json) = contents jsonResp
     return json
 #elif defined(client)
-xhrJSON url nonce identifier cid args = do
+xhrJSON url identifier cid args = do
     req' <- parseRequest $ concat ["POST ", urlString url, "/swapi/swremote"]
-    let req = setRequestBodyJSON (nonce, identifier, cid, reverse args) req'
+    let req = setRequestBodyJSON (identifier, cid, reverse args) req'
     jsonResp <- httpJSON req
     return $ getResponseBody jsonResp
 #endif
 
 #else
-onServer _ = ClientDummy
+onServerF _ = ClientDummy
 #endif
 
-subscribeOnServer :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
+subscribeOnServerF :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
 #if defined (ghcjs_HOST_OS) || defined(client)
-subscribeOnServer (Remote identifier mode args) cb = do
-    (nonce, mv) <- newResult mode
+subscribeOnServerF (Remote identifier mode args) cb = do
     url         <- ceUrl <$> ask
     cid         <- ceClientId <$> ask
-    n           <- csNonce    <$> get
 
     -- send the actual request and wait for the result
-    liftIO $ xhrJSON url nonce identifier cid args
-
+    liftIO $ xhrJSON url identifier cid args
+    return ()
+    {-
     liftIO $ forever $ do
         res <- (fromResult . fromJSON) <$> takeMVar mv
-        cb res
-
-
-newResult :: (Monad m, MonadIO m) => MethodMode -> Client e m (Nonce, MVar JSON)
-newResult mode = do
-    (ClientState mNonce mvarDispCenter) <- get
-    mv <- liftIO newEmptyMVar
-    nonce <- liftIO $ readTVarIO mNonce
-    liftIO $ atomically $ do
-        modifyTVar' mvarDispCenter (\m -> M.insert nonce (mode, mv) m)
-        writeTVar mNonce (nonce + 1)
-    return (nonce, mv)
-
-nextNonce :: (Monad m, MonadIO m) => Client t m Nonce
-nextNonce = do
-    (ClientState mNonce _) <- get
-    nonce <- liftIO $ readTVarIO mNonce
-    liftIO $ atomically $ writeTVar mNonce (nonce + 1)
-    return nonce
-
+        cb res -}
 #else
-subscribeOnServer _ _ = ClientDummy
+subscribeOnServerF _ _ = ClientDummy
 #endif
 
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS) || defined(client)
 runClient url env c = liftIO $ do
-    mvarDispCenter <- atomically $ newTVar M.empty
-    mNonce <- atomically $ newTVar 1
     cid <- UUID.generateUUID
 
 #if defined(ghcjs_HOST_OS)
     es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
-    onMessage (onServerMessage mvarDispCenter) es
+    onMessage onServerMessage es
 #endif
 
-    let defState = ClientState mNonce mvarDispCenter
-    runStateT (runReaderT c (ClientEnv url cid env)) defState
+    runReaderT c (ClientEnv url cid env)
 
     return AppDone
 
 #if defined(ghcjs_HOST_OS)
-onServerMessage mvarDispCenter e = do
+onServerMessage e = do
     let ME.StringData msg = ME.getData e
         res = fromJSON $ parseJSONString msg
     case res of
-        Success (nonce :: Int, result :: JSON) -> do
-            m <- readTVarIO mvarDispCenter
-            let (mode, mv) = m M.! nonce
-            putMVar mv result
+        Success (result :: JSON) -> return ()
         Error e -> print e
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
@@ -373,25 +344,27 @@ onEvent _ _ = ServerDummy
 #else
 -- server side dispatcher of client function calls
 onEvent mapping incoming = do
-    let Success (nonce :: Int, identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
+    let Success (identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
     e <- ask
     let Just (m, f) = M.lookup identifier mapping
-        processEvt = f args >>= (return . respBuilder nonce)
+        processEvt = f args >>= (return . respBuilder)
         processSub = void $ f args
-        newEnv = e { seClientId     = Just cid,
-                     seCurrentNonce = Just nonce
-                   }
+        newEnv = e { seClientId = Just cid }
     case m of
         MethodAsync -> liftIO $ runServerM newEnv processEvt
-        MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder nonce ([] :: [Int]))
+        MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder ([] :: [Int]))
 #endif
 
 #if defined(ghcjs_HOST_OS) || defined(client)
-skywalkerServer = undefined
+skywalkerServer :: Int -> a -> App ()
+skywalkerServer _ _ = return ()
 #else
-skywalkerServer remoteMapping sseChannelMapTVar backupApp =
-    restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping sseChannelMapTVar)]) $
-        sseApp "swsse" sseChannelMapTVar backupApp    
+skywalkerServer :: Int -> Application -> App ()
+skywalkerServer port backupApp = do
+    remoteMapping <- get
+    sseChannelMapTVar <- liftIO buildSSEChannelMapTVar
+    liftIO $ run port $ restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping sseChannelMapTVar)]) $
+        sseApp "swsse" sseChannelMapTVar backupApp
 
 swRestApp remoteMapping sseChannelMapTVar req = do
     msg <- lazyRequestBody req
@@ -419,6 +392,7 @@ sseApp endPoint sseChannelMapTVar backupApp req sendResponses = do
             eventSourceAppChan c req sendResponses
         else backupApp req sendResponses
 
-respBuilder :: ToJSON a => Int -> a -> LBS.ByteString
-respBuilder nonce res = encode (nonce, res)
+respBuilder :: ToJSON a => a -> LBS.ByteString
+respBuilder = encode
 #endif
+

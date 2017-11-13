@@ -99,8 +99,7 @@ data ChannelBuilder m = ChannelBuilder {
 -- data structures used for managing the subscription channels and clients
 data ClientSubscription m = ClientSubscription {
     csClientId   :: ClientID,
-    csSubModelId :: SubModelID m,
-    csNonce      :: Int
+    csSubModelId :: SubModelID m
     }
 
 -- data type used for managing the server side subscriptions
@@ -159,12 +158,10 @@ buildChannel = do
 -- subscribe to a channel on client side
 mkClientSubscribeFunc channelTVar sid = do
     clientIdM <- seClientId <$> ask
-    nonceM    <- seCurrentNonce <$> ask
-    liftIO $ when (isJust clientIdM && isJust nonceM) $ atomically $ do
+    liftIO $ when (isJust clientIdM) $ atomically $ do
         let cid    = fromJust clientIdM
-            nonce  = fromJust nonceM
         ch <- readTVar channelTVar
-        let cs = ClientSubscription cid sid nonce
+        let cs = ClientSubscription cid sid
             newCh = addClientSubscriber ch cs
         writeTVar channelTVar newCh
 
@@ -202,14 +199,13 @@ mkClientUnsubscribeFunc channelTVar sid = do
 
 publishToClient :: (Subscribable m, ToJSON m, ToJSON (SubModelID m)) => SubMessage m -> ClientSubscription m -> Server (Bool, ClientSubscription m)
 publishToClient msg cs = do
-    let nonce = csNonce cs
-        cid   = csClientId cs
+    let cid   = csClientId cs
     sseChanMapTVarM <- seSSEChanMapTVar <$> ask
     case sseChanMapTVarM of
         Just sseChanMapTVar -> do
             m <- liftIO $ readTVarIO sseChanMapTVar
             let cm = Map.lookup cid m
-                msgStr = respBuilder nonce msg
+                msgStr = respBuilder msg
             liftIO $ mapM_ (\c -> writeChan c $ ServerEvent Nothing Nothing [fromLazyByteString msgStr]) cm
             return (True, cs)
         Nothing -> return (False, cs)
