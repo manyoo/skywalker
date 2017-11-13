@@ -91,14 +91,18 @@ data MethodMode = MethodAsync
 -- the state stored in the App monad, it is a map of all the defined remote functions
 type AppState = M.Map MethodName (MethodMode, RemoteMethod)
 
+data AppMode = AppClassic  -- classic CS architecture. clients call server APIs
+             | AppPubSub   -- PubSub mode that servers can send SSE to clients
+             deriving Eq
+
 -- the top-level App monad for the whole app
-newtype App a = App { unApp :: StateT AppState IO a }
-              deriving (Functor, Applicative, Monad, MonadIO, MonadState AppState)
+newtype App a = App { unApp :: ReaderT AppMode (StateT AppState IO) a }
+              deriving (Functor, Applicative, Monad, MonadIO, MonadState AppState, MonadReader AppMode)
 
 -- run the top-level App monad and return an IO action. This should be used at the begining
 -- of the whole application
-runApp :: App AppDone -> IO ()
-runApp = void . flip runStateT M.empty . unApp
+runApp :: AppMode -> App AppDone -> IO ()
+runApp m app = void $ flip runStateT M.empty $ flip runReaderT m $ unApp app
 
 -- define a value that be used in remote functions
 class Remotable a where
@@ -310,15 +314,19 @@ subscribeOnServerF _ _ = ClientDummy
 
 runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS) || defined(client)
-runClient url env c = liftIO $ do
-    cid <- UUID.generateUUID
+runClient url env c = do
+    cid <- liftIO UUID.generateUUID
 
+    mode <- ask
 #if defined(ghcjs_HOST_OS)
-    es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
-    onMessage onServerMessage es
+    if (mode == AppPubSub)
+       then liftIO $ do
+        es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
+        onMessage onServerMessage es
+       else return ()
 #endif
 
-    runReaderT c (ClientEnv url cid env)
+    liftIO $ runReaderT c (ClientEnv url cid env)
 
     return AppDone
 
@@ -362,14 +370,19 @@ skywalkerServer _ _ = return ()
 skywalkerServer :: Int -> Application -> App ()
 skywalkerServer port backupApp = do
     remoteMapping <- get
-    sseChannelMapTVar <- liftIO buildSSEChannelMapTVar
-    liftIO $ run port $ restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping sseChannelMapTVar)]) $
-        sseApp "swsse" sseChannelMapTVar backupApp
+    mode <- ask
+    app <- if mode == AppClassic
+           then return $ restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping Nothing)]) backupApp
+           else do
+               sseChannelMapTVar <- liftIO buildSSEChannelMapTVar
+               return $ restOr "swapi" (buildRest [("swremote", swRestApp remoteMapping (Just sseChannelMapTVar))]) $ sseApp "swsse" sseChannelMapTVar backupApp
+    liftIO $ run port app
+    return ()
 
 swRestApp remoteMapping sseChannelMapTVar req = do
     msg <- lazyRequestBody req
     let Just (m :: JSON) = decode msg
-    runServerM (def {seSSEChanMapTVar = Just sseChannelMapTVar }) $ onEvent remoteMapping m
+    runServerM (def {seSSEChanMapTVar = sseChannelMapTVar }) $ onEvent remoteMapping m
 
 buildSSEChannelMapTVar :: IO (TVar SSEChannelMap)
 buildSSEChannelMapTVar = newTVarIO M.empty
