@@ -318,7 +318,7 @@ subscribeOnServerF (Remote identifier mode args) cb = do
     -- send the actual request and wait for the result
     liftIO $ xhrJSON url identifier cid args
 
-    liftIO $ forever $ do
+    liftIO $ void $ forkIO $ forever $ do
         res <- (fromResult . fromJSON) <$> readChan c
         cb res
 #else
