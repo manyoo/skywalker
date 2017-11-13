@@ -1,11 +1,13 @@
 {-# LANGUAGE CPP, GeneralizedNewtypeDeriving, ScopedTypeVariables, OverloadedStrings, JavaScriptFFI, GADTs, FlexibleInstances #-}
 module Skywalker.App where
 
-import Control.Monad.State.Strict
+import Control.Monad
+import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.IO.Class
 import Control.Concurrent
 import Control.Concurrent.MVar
+import Control.Concurrent.Chan
 import Control.Concurrent.STM
 import Data.Maybe (isJust, fromJust)
 import Data.Default
@@ -43,7 +45,6 @@ import Network.HTTP.Simple (parseRequest, setRequestBodyJSON, httpJSON, getRespo
 #else
 import Control.Exception (SomeException, handle)
 
-import Control.Concurrent.Chan
 import Data.Aeson
 import Data.Text
 import qualified Data.UUID as UUID
@@ -89,7 +90,12 @@ data MethodMode = MethodAsync
                 deriving Eq
 
 -- the state stored in the App monad, it is a map of all the defined remote functions
+#if defined(ghcjs_HOST_OS)
+-- client side app state will include the mapping of subscription channels
+type AppState = M.Map MethodName (Chan JSON)
+#else
 type AppState = M.Map MethodName (MethodMode, RemoteMethod)
+#endif
 
 data AppMode = AppClassic  -- classic CS architecture. clients call server APIs
              | AppPubSub   -- PubSub mode that servers can send SSE to clients
@@ -173,7 +179,12 @@ remoteChannel = remoteWithMode MethodSubscribe
 remoteWithMode :: Remotable a => MethodMode -> MethodName -> a -> App (Remote a)
 #if defined(ghcjs_HOST_OS) || defined(client)
 -- client side, just remember the name in the Remote value
-remoteWithMode m n _ = return (Remote n m [])
+remoteWithMode m n _ = do
+    when (m == MethodSubscribe) $ do
+        methodMap <- get
+        chan <- liftIO newChan
+        put $ M.insert n chan methodMap
+    return (Remote n m [])
 #else
 -- server side, convert the argument value into a Remote and store it in the AppState
 remoteWithMode m n f = do
@@ -197,6 +208,7 @@ liftServerIO m = return <$> liftIO m
 data ClientEnv a = ClientEnv {
     ceUrl      :: URL,
     ceClientId :: ClientID,
+    ceSubscriptionMapping :: Map MethodName (Chan JSON),
     ceCustom   :: a
     }
 -- a (Client m e a) monad value means a monad with (ClientEnv e) environment,
@@ -298,16 +310,17 @@ onServerF _ = ClientDummy
 subscribeOnServerF :: (FromJSON a, ToJSON a, Monad m, MonadIO m) => Remote (Server a) -> (a -> IO ()) -> Client e m ()
 #if defined (ghcjs_HOST_OS) || defined(client)
 subscribeOnServerF (Remote identifier mode args) cb = do
-    url         <- ceUrl <$> ask
-    cid         <- ceClientId <$> ask
+    url <- ceUrl <$> ask
+    cid <- ceClientId <$> ask
+    mapping <- ceSubscriptionMapping <$> ask
+    let c = mapping M.! identifier
 
     -- send the actual request and wait for the result
     liftIO $ xhrJSON url identifier cid args
-    return ()
-    {-
+
     liftIO $ forever $ do
-        res <- (fromResult . fromJSON) <$> takeMVar mv
-        cb res -}
+        res <- (fromResult . fromJSON) <$> readChan c
+        cb res
 #else
 subscribeOnServerF _ _ = ClientDummy
 #endif
@@ -316,26 +329,24 @@ runClient :: URL -> e -> Client e IO a -> App AppDone
 #if defined(ghcjs_HOST_OS) || defined(client)
 runClient url env c = do
     cid <- liftIO UUID.generateUUID
-
+    subscribeMapping <- get
     mode <- ask
 #if defined(ghcjs_HOST_OS)
-    if (mode == AppPubSub)
-       then liftIO $ do
+    when (mode == AppPubSub) $ liftIO $ do
         es <- mkEventSource $ pack $ "/swsse?clientId=" ++ show cid
-        onMessage onServerMessage es
-       else return ()
+        onMessage (onServerMessage subscribeMapping) es
 #endif
 
-    liftIO $ runReaderT c (ClientEnv url cid env)
+    liftIO $ runReaderT c (ClientEnv url cid subscribeMapping env)
 
     return AppDone
 
 #if defined(ghcjs_HOST_OS)
-onServerMessage e = do
+onServerMessage mapping e = do
     let ME.StringData msg = ME.getData e
         res = fromJSON $ parseJSONString msg
     case res of
-        Success (result :: JSON) -> return ()
+        Success (identifier :: String, result :: JSON) -> when (M.member identifier mapping) $ writeChan (mapping M.! identifier) result
         Error e -> print e
 
 -- import the javascript JSON.parse function to transform a js string to a JSON Value type
@@ -355,12 +366,12 @@ onEvent mapping incoming = do
     let Success (identifier :: MethodName, cid :: UUID, args :: [JSON]) = fromJSON incoming
     e <- ask
     let Just (m, f) = M.lookup identifier mapping
-        processEvt = f args >>= (return . respBuilder)
+        processEvt = f args >>= (return . encode)
         processSub = void $ f args
         newEnv = e { seClientId = Just cid }
     case m of
         MethodAsync -> liftIO $ runServerM newEnv processEvt
-        MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (respBuilder ([] :: [Int]))
+        MethodSubscribe -> liftIO $ runServerM newEnv processSub >> return (encode ([] :: [Int]))
 #endif
 
 #if defined(ghcjs_HOST_OS) || defined(client)
@@ -404,8 +415,5 @@ sseApp endPoint sseChannelMapTVar backupApp req sendResponses = do
             atomically $ modifyTVar sseChannelMapTVar (M.alter (const $ Just c) cid)
             eventSourceAppChan c req sendResponses
         else backupApp req sendResponses
-
-respBuilder :: ToJSON a => a -> LBS.ByteString
-respBuilder = encode
 #endif
 
